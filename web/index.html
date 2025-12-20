@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FFmpeg WASM Matroska Player</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div>
+          <h1>FFmpeg WASM Matroska Player</h1>
+          <p>Audio worklet playback with optional WebGL rendering.</p>
+        </div>
+        <div class="status" id="status">Loading module...</div>
+      </header>
+
+      <section class="panel grid">
+        <div class="field">
+          <label for="fileInput">Local file</label>
+          <input id="fileInput" type="file" accept="video/*,.mkv,.webm,.gif,.avi,.flv,.ts,.m2ts,.mts,.mov,.mp4,.m4v,.ogv,.ogg,.3gp,.3g2,.wmv,.asf,.vob,.mpeg,.mpg,.mxf,.f4v,.rm,.rmvb,.divx,.hevc,.h264,.h265,.av1,.vp8,.vp9" />
+          <span class="hint">Matroska (MKV) recommended.</span>
+        </div>
+        <div class="field">
+          <label for="urlInput">Stream URL (CORS required)</label>
+          <input
+            id="urlInput"
+            type="url"
+            placeholder="https://example.com/video.mkv"
+          />
+          <span class="hint">Uses fetch streaming; same-origin or CORS.</span>
+        </div>
+        <div class="field">
+          <label for="formatSelect">Container hint</label>
+          <select id="formatSelect">
+            <option value="">Auto detect</option>
+            <option value="mov">MP4 / QuickTime (mov)</option>
+            <option value="matroska" selected>Matroska / WebM</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="renderMode">Render mode</label>
+          <select id="renderMode">
+            <option value="2d" selected>Canvas 2D</option>
+            <option value="webgl">WebGL (optional)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="bufferSize">Initial buffer (MB)</label>
+          <input id="bufferSize" type="number" min="1" max="64" value="4" />
+        </div>
+        <div class="field">
+          <label for="volumeRange">Volume</label>
+          <div class="range-row">
+            <input id="volumeRange" type="range" min="0" max="1" step="0.01" value="0.8" />
+            <span id="volumeValue">80%</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel actions">
+        <button id="startBtn" disabled>Start</button>
+        <button id="pauseBtn" disabled>Pause</button>
+        <button id="stopBtn" disabled>Stop</button>
+      </section>
+
+      <section class="player" id="player">
+        <div class="canvas-wrap" id="canvasWrap">
+          <canvas id="canvas2d"></canvas>
+          <canvas id="canvasGl" class="is-hidden"></canvas>
+          <div class="canvas-controls">
+            <div class="controls-left">
+              <button id="overlayPlay">Play</button>
+              <button id="overlayPause">Pause</button>
+              <button id="overlayStop" class="danger">Stop</button>
+            </div>
+            <div class="controls-center">
+              <span id="timeCurrent">0:00</span>
+              <input id="seekRange" type="range" min="0" max="0" step="0.01" value="0" disabled />
+              <span id="timeTotal">--:--</span>
+            </div>
+            <div class="controls-right">
+              <button id="overlayMute">Mute</button>
+              <input id="overlayVolume" type="range" min="0" max="1" step="0.01" value="0.8" />
+              <button id="overlayFullscreen">Full</button>
+            </div>
+          </div>
+        </div>
+        <div class="stats">
+          <div>
+            <span class="label">Resolution</span>
+            <span id="resolution">-</span>
+          </div>
+          <div>
+            <span class="label">Frames</span>
+            <span id="frameCount">0</span>
+          </div>
+          <div>
+            <span class="label">Buffered</span>
+            <span id="bytesCount">0 B</span>
+          </div>
+          <div>
+            <span class="label">PTS</span>
+            <span id="ptsValue">0.00s</span>
+          </div>
+          <div>
+            <span class="label">Audio</span>
+            <span id="audioInfo">-</span>
+          </div>
+          <div>
+            <span class="label">Audio clock</span>
+            <span id="audioClock">0.00s</span>
+          </div>
+        </div>
+        <pre id="log" aria-live="polite"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

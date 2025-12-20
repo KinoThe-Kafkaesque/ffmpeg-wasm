@@ -1,0 +1,30 @@
+# Emscripten local
+/.emscripten
+/.emscripten_cache/
+/.emscripten_ports/
+/.emscripten_temp/
+
+# Build outputs
+/build/
+/dist/
+/out/
+/web/dist/
+/*.wasm
+/*.data
+/*.mem
+
+# Third-party sources
+/third_party/emsdk/
+/third_party/ffmpeg/
+/ffmpeg-src/
+
+# Node
+/node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Vite/React demo
+/web-react/node_modules/
+/web-react/dist/
+/web-react/.vite/
+/third_party
