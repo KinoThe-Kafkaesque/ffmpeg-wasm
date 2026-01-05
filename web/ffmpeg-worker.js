@@ -7,6 +7,7 @@ const DEFAULT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const SEEK_MAX_BUFFER_BYTES = 48 * 1024 * 1024;
 const BUFFER_POLL_MS = 15;
 const MAX_CHUNK_BYTES = 256 * 1024;
+const MIN_OPEN_BYTES = 512 * 1024; // Minimum bytes before attempting to open container
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -210,6 +211,8 @@ const allocateAndAppend = (chunk) => {
 
 const tryOpen = () => {
   if (state.opened || !state.ctx) return;
+  // Wait for minimum data before attempting to parse container header
+  if (state.bytes < MIN_OPEN_BYTES && !state.draining) return;
 
   const ret = state.api.open(state.ctx, state.formatHint || null);
   if (ret === 0) {

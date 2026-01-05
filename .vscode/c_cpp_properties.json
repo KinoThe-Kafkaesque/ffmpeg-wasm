@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "Emscripten",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/third_party/emsdk/upstream/emscripten/cache/sysroot/include",
+                "${workspaceFolder}/third_party/emsdk/upstream/emscripten/system/include",
+                "${workspaceFolder}/build/ffmpeg-wasm/include"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "compilerPath": "${workspaceFolder}/third_party/emsdk/upstream/emscripten/emcc",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-clang-x86"
+        }
+    ],
+    "version": 4
+}

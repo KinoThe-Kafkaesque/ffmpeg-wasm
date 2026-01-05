@@ -501,6 +501,13 @@ function App() {
       return () => {};
     }
 
+    // Check if canvases were already transferred (can't transfer twice)
+    if (canvas2d._transferred || canvasGl._transferred) {
+      setStatus("Canvas already transferred - please refresh the page");
+      log("OffscreenCanvas can only be transferred once. Refresh to reset.");
+      return () => {};
+    }
+
     const worker = new Worker("/ffmpeg-worker.js");
     workerRef.current = worker;
 
@@ -586,6 +593,8 @@ function App() {
 
     const offscreen2d = canvas2d.transferControlToOffscreen();
     const offscreenGl = canvasGl.transferControlToOffscreen();
+    canvas2d._transferred = true;
+    canvasGl._transferred = true;
     worker.postMessage(
       { type: "init", canvas2d: offscreen2d, canvasGl: offscreenGl, renderMode },
       [offscreen2d, offscreenGl],
@@ -615,7 +624,7 @@ function App() {
           <input
             id="fileInput"
             type="file"
-            accept="video/*"
+            accept="video/*,.mkv,video/x-matroska"
             ref={fileRef}
             onChange={() => {
               if (urlRef.current) urlRef.current.value = "";

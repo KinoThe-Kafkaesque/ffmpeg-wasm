@@ -1,4 +1,4 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -19,7 +19,11 @@
       <section class="panel grid">
         <div class="field">
           <label for="fileInput">Local file</label>
-          <input id="fileInput" type="file" accept="video/*,.mkv,.webm,.gif,.avi,.flv,.ts,.m2ts,.mts,.mov,.mp4,.m4v,.ogv,.ogg,.3gp,.3g2,.wmv,.asf,.vob,.mpeg,.mpg,.mxf,.f4v,.rm,.rmvb,.divx,.hevc,.h264,.h265,.av1,.vp8,.vp9" />
+          <input
+            id="fileInput"
+            type="file"
+            accept="video/*,.mkv,video/x-matroska"
+          />
           <span class="hint">Matroska (MKV) recommended.</span>
         </div>
         <div class="field">
@@ -53,7 +57,14 @@
         <div class="field">
           <label for="volumeRange">Volume</label>
           <div class="range-row">
-            <input id="volumeRange" type="range" min="0" max="1" step="0.01" value="0.8" />
+            <input
+              id="volumeRange"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value="0.8"
+            />
             <span id="volumeValue">80%</span>
           </div>
         </div>
@@ -77,12 +88,27 @@
             </div>
             <div class="controls-center">
               <span id="timeCurrent">0:00</span>
-              <input id="seekRange" type="range" min="0" max="0" step="0.01" value="0" disabled />
+              <input
+                id="seekRange"
+                type="range"
+                min="0"
+                max="0"
+                step="0.01"
+                value="0"
+                disabled
+              />
               <span id="timeTotal">--:--</span>
             </div>
             <div class="controls-right">
               <button id="overlayMute">Mute</button>
-              <input id="overlayVolume" type="range" min="0" max="1" step="0.01" value="0.8" />
+              <input
+                id="overlayVolume"
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value="0.8"
+              />
               <button id="overlayFullscreen">Full</button>
             </div>
           </div>

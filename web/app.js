@@ -95,7 +95,9 @@ const formatTime = (seconds) => {
   const mins = Math.floor((total % 3600) / 60);
   const secs = Math.floor(total % 60);
   if (hrs > 0) {
-    return `${hrs}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+    return `${hrs}:${mins.toString().padStart(2, "0")}:${secs
+      .toString()
+      .padStart(2, "0")}`;
   }
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 };
@@ -111,7 +113,9 @@ const syncOverlayControls = () => {
 
 const updateFullscreenButton = () => {
   if (overlayFullscreen) {
-    overlayFullscreen.textContent = document.fullscreenElement ? "Exit" : "Full";
+    overlayFullscreen.textContent = document.fullscreenElement
+      ? "Exit"
+      : "Full";
   }
 };
 
@@ -243,7 +247,8 @@ const updateStats = () => {
 
 const syncAudioClock = () => {
   if (state.audio.context && state.audio.basePts !== null) {
-    state.audio.startTime = state.audio.context.currentTime - state.audio.basePts;
+    state.audio.startTime =
+      state.audio.context.currentTime - state.audio.basePts;
   }
 };
 
@@ -361,7 +366,9 @@ const clearAudioQueue = () => {
   }
   state.audio.pending = [];
   state.audio.basePts = null;
-  state.audio.startTime = state.audio.context ? state.audio.context.currentTime : 0;
+  state.audio.startTime = state.audio.context
+    ? state.audio.context.currentTime
+    : 0;
   updateAudioDisplay();
 };
 
@@ -414,7 +421,8 @@ const stopPlayback = async () => {
   if (state.worker) {
     state.worker.postMessage({ type: "stop" });
   }
-  suspendAudio();
+  // Close audio context so next file can create one with correct sample rate
+  await closeAudio();
   pauseBtn.disabled = true;
   stopBtn.disabled = true;
   startBtn.disabled = !state.ready;
@@ -460,9 +468,7 @@ const startPlayback = () => {
     startBtn.disabled = true;
     syncOverlayControls();
 
-    if (!state.audio.initPromise && !state.audio.failed) {
-      initAudio(DEFAULT_AUDIO_RATE, 2);
-    }
+    // Don't pre-initialize audio - wait for actual audio data to know the real sample rate
 
     state.worker.postMessage({
       type: "load",
@@ -487,9 +493,10 @@ const performSeek = (seconds) => {
     log("Seek disabled for this source.");
     return;
   }
-  const target = state.duration > 0
-    ? Math.max(0, Math.min(seconds, state.duration))
-    : Math.max(0, seconds);
+  const target =
+    state.duration > 0
+      ? Math.max(0, Math.min(seconds, state.duration))
+      : Math.max(0, seconds);
   clearAudioQueue();
   state.pts = target;
   updateTimeline(target);
@@ -503,7 +510,10 @@ const commitSeekFromUi = () => {
   const value = Number.parseFloat(seekRange.value);
   if (!Number.isFinite(value)) return;
   const now = performance.now();
-  if (Math.abs(value - state.lastSeekCommitValue) < 0.01 && now - state.lastSeekCommitTs < 200) {
+  if (
+    Math.abs(value - state.lastSeekCommitValue) < 0.01 &&
+    now - state.lastSeekCommitTs < 200
+  ) {
     return;
   }
   state.lastSeekCommitTs = now;
@@ -560,14 +570,21 @@ const initWorker = () => {
       state.frames = msg.frames || 0;
       state.bytes = msg.bytes || 0;
       state.pts = Number.isFinite(msg.pts) ? msg.pts : 0;
-      if (Number.isFinite(msg.duration) && msg.duration > 0 && msg.duration !== state.duration) {
+      if (
+        Number.isFinite(msg.duration) &&
+        msg.duration > 0 &&
+        msg.duration !== state.duration
+      ) {
         setDuration(msg.duration);
         if (state.seekEnabled) {
           setSeekEnabled(true, state.seekHint);
         }
       }
 
-      if (Number.isFinite(msg.audioSampleRate) && Number.isFinite(msg.audioChannels)) {
+      if (
+        Number.isFinite(msg.audioSampleRate) &&
+        Number.isFinite(msg.audioChannels)
+      ) {
         state.audio.sampleRate = msg.audioSampleRate || 0;
         state.audio.channels = msg.audioChannels || 0;
       }
@@ -612,11 +629,25 @@ const initWorker = () => {
     setStatus("Worker error");
   };
 
+  // Check if canvases were already transferred (can't transfer twice)
+  if (canvas2d._transferred || canvasGl._transferred) {
+    setStatus("Canvas already transferred - please refresh the page");
+    log("OffscreenCanvas can only be transferred once. Refresh to reset.");
+    return;
+  }
+
   const offscreen2d = canvas2d.transferControlToOffscreen();
   const offscreenGl = canvasGl.transferControlToOffscreen();
+  canvas2d._transferred = true;
+  canvasGl._transferred = true;
   worker.postMessage(
-    { type: "init", canvas2d: offscreen2d, canvasGl: offscreenGl, renderMode: renderModeSelect.value },
-    [offscreen2d, offscreenGl],
+    {
+      type: "init",
+      canvas2d: offscreen2d,
+      canvasGl: offscreenGl,
+      renderMode: renderModeSelect.value,
+    },
+    [offscreen2d, offscreenGl]
   );
 };
 

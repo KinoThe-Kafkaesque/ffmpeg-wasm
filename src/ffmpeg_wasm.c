@@ -333,7 +333,7 @@ static int setup_audio_resampler(FFmpegWasmContext *ctx) {
       out_rate,
       &ctx->audio_codec->ch_layout,
       ctx->audio_codec->sample_fmt,
-      out_rate,
+      ctx->audio_codec->sample_rate,  // use actual input sample rate
       0,
       NULL);
   av_channel_layout_uninit(&out_layout);
