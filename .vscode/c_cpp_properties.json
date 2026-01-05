@@ -3,20 +3,25 @@
         {
             "name": "Emscripten",
             "includePath": [
-                "${workspaceFolder}/**",
+                "${workspaceFolder}/src",
                 "${workspaceFolder}/third_party/emsdk/upstream/emscripten/cache/sysroot/include",
-                "${workspaceFolder}/third_party/emsdk/upstream/emscripten/system/include",
-                "${workspaceFolder}/build/ffmpeg-wasm/include"
+                "${workspaceFolder}/third_party/emsdk/upstream/emscripten/cache/sysroot/include/compat",
+                "${workspaceFolder}/third_party/emsdk/upstream/emscripten/cache/sysroot/include/fakesdl",
+                "${workspaceFolder}/third_party/emsdk/upstream/lib/clang/18/include",
+                "${workspaceFolder}/build/ffmpeg-wasm/include",
+                "${workspaceFolder}/build/ffmpeg-wasm/include/freetype2",
+                "${workspaceFolder}/build/ffmpeg-wasm/include/fribidi"
             ],
             "defines": [
                 "_DEBUG",
                 "UNICODE",
-                "_UNICODE"
+                "_UNICODE",
+                "__EMSCRIPTEN__"
             ],
             "compilerPath": "${workspaceFolder}/third_party/emsdk/upstream/emscripten/emcc",
             "cStandard": "c11",
             "cppStandard": "c++17",
-            "intelliSenseMode": "linux-clang-x86"
+            "intelliSenseMode": "linux-clang-wasm32"
         }
     ],
     "version": 4

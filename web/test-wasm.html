@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>FFmpeg WASM Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    #log { white-space: pre-wrap; background: #f0f0f0; padding: 10px; max-height: 500px; overflow: auto; }
+    button { margin: 5px; padding: 10px; }
+  </style>
+</head>
+<body>
+  <h1>FFmpeg WASM Isolation Test</h1>
+  <input type="file" id="fileInput" accept="video/*">
+  <br><br>
+  <button id="testBtn" disabled>Test Open</button>
+  <button id="clearBtn">Clear Log</button>
+  <br><br>
+  <div id="log"></div>
+
+  <script src="ffmpeg_wasm.js"></script>
+  <script>
+    const log = (msg) => {
+      const el = document.getElementById('log');
+      el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      el.scrollTop = el.scrollHeight;
+      console.log(msg);
+    };
+
+    let Module = null;
+    let api = null;
+    let fileBuffer = null;
+
+    // Initialize WASM module
+    FFmpegWasm().then(m => {
+      Module = m;
+      api = {
+        create: Module.cwrap("ffmpeg_wasm_create", "number", ["number"]),
+        destroy: Module.cwrap("ffmpeg_wasm_destroy", null, ["number"]),
+        append: Module.cwrap("ffmpeg_wasm_append", "number", ["number", "number", "number"]),
+        setEof: Module.cwrap("ffmpeg_wasm_set_eof", null, ["number"]),
+        open: Module.cwrap("ffmpeg_wasm_open", "number", ["number", "string"]),
+        width: Module.cwrap("ffmpeg_wasm_video_width", "number", ["number"]),
+        height: Module.cwrap("ffmpeg_wasm_video_height", "number", ["number"]),
+        duration: Module.cwrap("ffmpeg_wasm_duration_seconds", "number", ["number"]),
+      };
+      log("WASM Module loaded");
+      document.getElementById('testBtn').disabled = false;
+    });
+
+    // Load file
+    document.getElementById('fileInput').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      log(`Loading file: ${file.name} (${file.size} bytes)`);
+      fileBuffer = new Uint8Array(await file.arrayBuffer());
+      log(`File loaded into memory: ${fileBuffer.length} bytes`);
+
+      // Show first 256 bytes as hex
+      let hex = '';
+      for (let i = 0; i < Math.min(256, fileBuffer.length); i++) {
+        hex += fileBuffer[i].toString(16).padStart(2, '0') + ' ';
+        if ((i + 1) % 16 === 0) hex += '\n';
+      }
+      log(`First 256 bytes:\n${hex}`);
+    });
+
+    // Test open
+    document.getElementById('testBtn').addEventListener('click', () => {
+      if (!fileBuffer) {
+        log("No file loaded");
+        return;
+      }
+
+      log("Creating context...");
+      const ctx = api.create(0);
+      log(`Context created: ${ctx}`);
+
+      if (!ctx) {
+        log("Failed to create context");
+        return;
+      }
+
+      // Append entire file at once
+      log(`Appending ${fileBuffer.length} bytes...`);
+      const ptr = Module._malloc(fileBuffer.length);
+      Module.HEAPU8.set(fileBuffer, ptr);
+      const appendRet = api.append(ctx, ptr, fileBuffer.length);
+      Module._free(ptr);
+      log(`Append returned: ${appendRet}`);
+
+      // Set EOF
+      log("Setting EOF...");
+      api.setEof(ctx);
+
+      // Try to open
+      log("Calling open...");
+      const openRet = api.open(ctx, null);
+      log(`Open returned: ${openRet}`);
+
+      if (openRet === 0) {
+        const w = api.width(ctx);
+        const h = api.height(ctx);
+        const dur = api.duration(ctx);
+        log(`SUCCESS! Video: ${w}x${h}, Duration: ${dur}s`);
+      } else {
+        log(`FAILED with code: ${openRet}`);
+        if (openRet === -6) log("  (EAGAIN - needs more data)");
+        if (openRet === -1094995529) log("  (AVERROR_INVALIDDATA)");
+      }
+
+      // Cleanup
+      log("Destroying context...");
+      api.destroy(ctx);
+      log("Done");
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      document.getElementById('log').textContent = '';
+    });
+  </script>
+</body>
+</html>

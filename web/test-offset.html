@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Buffer Offset Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    #log { white-space: pre-wrap; background: #f0f0f0; padding: 10px; max-height: 500px; overflow: auto; }
+    button { margin: 5px; padding: 10px; }
+    .pass { color: green; }
+    .fail { color: red; }
+  </style>
+</head>
+<body>
+  <h1>WASM Buffer Offset Test</h1>
+  <p>Tests that FFmpeg correctly reports positions when buffer.offset is set.</p>
+  <input type="file" id="fileInput" accept="video/*">
+  <br><br>
+  <button id="testBtn" disabled>Run Test</button>
+  <button id="clearBtn">Clear Log</button>
+  <br><br>
+  <div id="log"></div>
+
+  <script src="ffmpeg_wasm.js"></script>
+  <script>
+    const log = (msg, cls = '') => {
+      const el = document.getElementById('log');
+      if (cls) {
+        el.innerHTML += `<span class="${cls}">${msg}</span>\n`;
+      } else {
+        el.textContent += msg + '\n';
+      }
+      el.scrollTop = el.scrollHeight;
+      console.log(msg);
+    };
+
+    let Module = null;
+    let api = null;
+    let fileBuffer = null;
+    let fileName = '';
+
+    FFmpegWasm().then(m => {
+      Module = m;
+      api = {
+        create: Module.cwrap("ffmpeg_wasm_create", "number", ["number"]),
+        destroy: Module.cwrap("ffmpeg_wasm_destroy", null, ["number"]),
+        append: Module.cwrap("ffmpeg_wasm_append", "number", ["number", "number", "number"]),
+        setEof: Module.cwrap("ffmpeg_wasm_set_eof", null, ["number"]),
+        open: Module.cwrap("ffmpeg_wasm_open", "number", ["number", "string"]),
+        setFileSize: Module.cwrap("ffmpeg_wasm_set_file_size", null, ["number", "number"]),
+        setBufferOffset: Module.cwrap("ffmpeg_wasm_set_buffer_offset", null, ["number", "number"]),
+        bufferedBytes: Module.cwrap("ffmpeg_wasm_buffered_bytes", "number", ["number"]),
+        duration: Module.cwrap("ffmpeg_wasm_duration_seconds", "number", ["number"]),
+        readFrame: Module.cwrap("ffmpeg_wasm_read_frame", "number", ["number"]),
+        pts: Module.cwrap("ffmpeg_wasm_frame_pts_seconds", "number", ["number"]),
+        width: Module.cwrap("ffmpeg_wasm_video_width", "number", ["number"]),
+        height: Module.cwrap("ffmpeg_wasm_video_height", "number", ["number"]),
+      };
+      log("WASM Module loaded");
+      document.getElementById('testBtn').disabled = false;
+    });
+
+    document.getElementById('fileInput').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      fileName = file.name;
+      log(`Loading file: ${file.name} (${file.size} bytes)`);
+      fileBuffer = new Uint8Array(await file.arrayBuffer());
+      log(`File loaded: ${fileBuffer.length} bytes`);
+    });
+
+    const appendData = (ctx, data) => {
+      const ptr = Module._malloc(data.length);
+      Module.HEAPU8.set(data, ptr);
+      const ret = api.append(ctx, ptr, data.length);
+      Module._free(ptr);
+      return ret;
+    };
+
+    const decodeUntilFrame = (ctx, maxFrames = 100) => {
+      for (let i = 0; i < maxFrames; i++) {
+        const ret = api.readFrame(ctx);
+        if (ret === 1) {
+          return api.pts(ctx);
+        }
+        if (ret === 2) continue; // audio
+        if (ret <= 0) return null;
+      }
+      return null;
+    };
+
+    document.getElementById('testBtn').addEventListener('click', async () => {
+      if (!fileBuffer) {
+        log("No file loaded");
+        return;
+      }
+
+      log("\n=== TEST 1: Full file from start ===");
+      {
+        const ctx = api.create(0);
+        api.setFileSize(ctx, fileBuffer.length);
+        // Offset = 0 (default)
+        appendData(ctx, fileBuffer);
+        api.setEof(ctx);
+        const openRet = api.open(ctx, null);
+        if (openRet !== 0) {
+          log(`Open failed: ${openRet}`, 'fail');
+          api.destroy(ctx);
+        } else {
+          const duration = api.duration(ctx);
+          const firstPts = decodeUntilFrame(ctx);
+          log(`Duration: ${duration.toFixed(2)}s, First frame PTS: ${firstPts?.toFixed(3)}s`);
+          log("Full file works", 'pass');
+          api.destroy(ctx);
+        }
+      }
+
+      log("\n=== TEST 2: Partial file with offset ===");
+      {
+        // Simulate seeking to middle of file
+        const skipBytes = Math.floor(fileBuffer.length / 2);
+        const alignedSkip = Math.floor(skipBytes / (1024 * 1024)) * (1024 * 1024);
+        const partialData = fileBuffer.slice(alignedSkip);
+
+        log(`Skipping ${alignedSkip} bytes (${(alignedSkip/1024/1024).toFixed(1)}MB)`);
+        log(`Feeding ${partialData.length} bytes starting at offset ${alignedSkip}`);
+
+        const ctx = api.create(0);
+        api.setFileSize(ctx, fileBuffer.length);
+        api.setBufferOffset(ctx, alignedSkip);  // KEY: Tell FFmpeg where this data starts
+
+        appendData(ctx, partialData);
+        api.setEof(ctx);
+
+        const openRet = api.open(ctx, null);
+        if (openRet !== 0) {
+          log(`Open with offset failed: ${openRet}`, 'fail');
+          log("This is expected for some formats - FFmpeg needs headers from file start");
+        } else {
+          const duration = api.duration(ctx);
+          const firstPts = decodeUntilFrame(ctx);
+          log(`Duration: ${duration.toFixed(2)}s, First frame PTS: ${firstPts?.toFixed(3)}s`);
+          if (firstPts !== null && firstPts > 1) {
+            log(`SUCCESS: First frame is at ${firstPts.toFixed(2)}s (not 0)`, 'pass');
+          } else {
+            log(`First PTS is ${firstPts} - may need headers`, 'fail');
+          }
+        }
+        api.destroy(ctx);
+      }
+
+      log("\n=== TEST 3: Headers + skip + partial ===");
+      {
+        // For MKV/WebM: feed headers first, then skip to middle
+        // This mimics what we'd need to do in practice
+        const headerSize = 2 * 1024 * 1024; // First 2MB has headers
+        const skipTo = Math.floor(fileBuffer.length / 2);
+        const alignedSkip = Math.floor(skipTo / (1024 * 1024)) * (1024 * 1024);
+
+        log(`Feeding first ${headerSize} bytes (headers)`);
+        log(`Then skipping to byte ${alignedSkip} and feeding rest`);
+
+        const ctx = api.create(0);
+        api.setFileSize(ctx, fileBuffer.length);
+
+        // Feed headers
+        const headers = fileBuffer.slice(0, headerSize);
+        appendData(ctx, headers);
+
+        // Try to open with just headers
+        let openRet = api.open(ctx, null);
+        if (openRet !== 0) {
+          log(`Can't open with just headers: ${openRet}`);
+          api.destroy(ctx);
+        } else {
+          const duration = api.duration(ctx);
+          log(`Opened! Duration: ${duration.toFixed(2)}s`);
+
+          // Now the question is: can we seek within FFmpeg after opening?
+          // This test shows we need a different approach...
+          log("Headers-only approach needs seek API, not buffer offset", 'fail');
+          api.destroy(ctx);
+        }
+      }
+
+      log("\n=== CONCLUSION ===");
+      log("Buffer offset works for formats where data is self-contained (like TS)");
+      log("For MKV/MP4, we need headers from file start + seek within FFmpeg");
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      document.getElementById('log').textContent = '';
+    });
+  </script>
+</body>
+</html>

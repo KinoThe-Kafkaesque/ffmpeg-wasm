@@ -1,0 +1,7 @@
+{
+    "clangd.arguments": [
+        "--query-driver=/home/nyanpasu/Desktop/code/kinoSoft/ffmpeg/third_party/emsdk/upstream/emscripten/emcc",
+        "--header-insertion=never",
+        "--compile-commands-dir=${workspaceFolder}"
+    ]
+}

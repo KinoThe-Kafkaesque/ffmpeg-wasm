@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Seek Logic Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    #log { white-space: pre-wrap; background: #f0f0f0; padding: 10px; max-height: 400px; overflow: auto; }
+    .pass { color: green; }
+    .fail { color: red; }
+    table { border-collapse: collapse; margin: 10px 0; }
+    td, th { border: 1px solid #ccc; padding: 5px 10px; text-align: right; }
+  </style>
+</head>
+<body>
+  <h1>Seek Logic Test (No WASM)</h1>
+  <p>Tests the byte offset calculation logic in isolation.</p>
+
+  <h3>File Parameters</h3>
+  <label>File Size (MB): <input type="number" id="fileSize" value="500"></label>
+  <label>Duration (s): <input type="number" id="duration" value="3600"></label>
+  <br><br>
+  <button id="runTest">Run Calculation Tests</button>
+  <br><br>
+
+  <h3>Results</h3>
+  <div id="log"></div>
+
+  <script>
+    const log = (msg, cls = '') => {
+      const el = document.getElementById('log');
+      if (cls) {
+        el.innerHTML += `<span class="${cls}">${msg}</span>\n`;
+      } else {
+        el.textContent += msg + '\n';
+      }
+    };
+
+    // This is the logic from performSlowSeek
+    const calculateSeekOffset = (target, duration, fileSize) => {
+      let startByte = 0;
+      if (duration > 0 && fileSize > 0) {
+        const seekBackSeconds = 5;
+        const targetTime = Math.max(0, target - seekBackSeconds);
+        const ratio = targetTime / duration;
+        startByte = Math.floor(ratio * fileSize);
+        // Align to 1MB boundary
+        startByte = Math.floor(startByte / (1024 * 1024)) * (1024 * 1024);
+      }
+      return startByte;
+    };
+
+    document.getElementById('runTest').addEventListener('click', () => {
+      document.getElementById('log').innerHTML = '';
+
+      const fileSizeMB = parseFloat(document.getElementById('fileSize').value) || 500;
+      const duration = parseFloat(document.getElementById('duration').value) || 3600;
+      const fileSize = fileSizeMB * 1024 * 1024;
+
+      log(`File: ${fileSizeMB}MB, Duration: ${duration}s`);
+      log(`Average bitrate: ${((fileSize * 8) / duration / 1000000).toFixed(2)} Mbps`);
+      log('');
+
+      const testCases = [
+        { target: 0, desc: 'Start' },
+        { target: 5, desc: '5s (within seekBack)' },
+        { target: 10, desc: '10s' },
+        { target: 60, desc: '1 min' },
+        { target: 300, desc: '5 min' },
+        { target: 600, desc: '10 min' },
+        { target: 1800, desc: '30 min' },
+        { target: 3000, desc: '50 min' },
+        { target: 3595, desc: 'Near end' },
+      ].filter(t => t.target <= duration);
+
+      let html = '<table><tr><th>Target</th><th>Start Byte</th><th>Skip %</th><th>Expected Time</th></tr>';
+
+      for (const tc of testCases) {
+        const startByte = calculateSeekOffset(tc.target, duration, fileSize);
+        const skipPercent = ((startByte / fileSize) * 100).toFixed(1);
+        const expectedTime = (startByte / fileSize) * duration;
+
+        html += `<tr>
+          <td>${tc.target}s (${tc.desc})</td>
+          <td>${(startByte / 1024 / 1024).toFixed(0)}MB</td>
+          <td>${skipPercent}%</td>
+          <td>~${expectedTime.toFixed(1)}s</td>
+        </tr>`;
+      }
+      html += '</table>';
+
+      document.getElementById('log').innerHTML += html;
+
+      // Validate logic
+      log('\n=== Validation ===');
+
+      const test1 = calculateSeekOffset(0, duration, fileSize);
+      if (test1 === 0) {
+        log('PASS: target=0 returns startByte=0', 'pass');
+      } else {
+        log(`FAIL: target=0 returned ${test1}`, 'fail');
+      }
+
+      const test2 = calculateSeekOffset(5, duration, fileSize);
+      if (test2 === 0) {
+        log('PASS: target=5 (within seekBack) returns startByte=0', 'pass');
+      } else {
+        log(`FAIL: target=5 returned ${test2}`, 'fail');
+      }
+
+      const test3 = calculateSeekOffset(duration / 2, duration, fileSize);
+      const expected3 = Math.floor((((duration / 2) - 5) / duration) * fileSize);
+      const aligned3 = Math.floor(expected3 / (1024 * 1024)) * (1024 * 1024);
+      if (test3 === aligned3) {
+        log(`PASS: target=${duration/2}s returns ${(test3/1024/1024).toFixed(0)}MB`, 'pass');
+      } else {
+        log(`FAIL: target=${duration/2}s expected ${aligned3} got ${test3}`, 'fail');
+      }
+
+      // Test: startByte should never exceed file size
+      const test4 = calculateSeekOffset(duration, duration, fileSize);
+      if (test4 < fileSize) {
+        log(`PASS: target=end returns ${(test4/1024/1024).toFixed(0)}MB (< fileSize)`, 'pass');
+      } else {
+        log(`FAIL: target=end returned ${test4} >= ${fileSize}`, 'fail');
+      }
+
+      log('\n=== File.slice() simulation ===');
+      const seekTarget = 1800; // 30 min
+      const startByte = calculateSeekOffset(seekTarget, duration, fileSize);
+      log(`Seeking to ${seekTarget}s:`);
+      log(`  file.slice(${startByte}) = file.slice(${(startByte/1024/1024).toFixed(0)}MB)`);
+      log(`  Remaining bytes: ${((fileSize - startByte)/1024/1024).toFixed(0)}MB`);
+      log(`  setBufferOffset(ctx, ${startByte})`);
+    });
+
+    // Auto-run on load
+    document.getElementById('runTest').click();
+  </script>
+</body>
+</html>

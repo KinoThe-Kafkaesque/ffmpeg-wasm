@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FFmpeg WASM Player v3</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles-v3.css" />
+  </head>
+  <body>
+    <div class="app-container">
+      <header>
+        <div>
+          <h1>FFmpeg Player v3</h1>
+          <p>High-performance WASM Matroska playback</p>
+        </div>
+        <div class="header-status" id="status">Loading module...</div>
+      </header>
+
+      <main class="player-section" id="player">
+        <div class="video-container" id="canvasWrap">
+          <canvas id="canvas2d"></canvas>
+          <canvas id="canvasGl" class="is-hidden"></canvas>
+
+          <!-- OSD -->
+          <div id="osd" class="osd"></div>
+
+          <!-- Top Menu Bar Overlay -->
+          <div class="menu-bar-overlay" id="menuBar">
+            
+            <!-- FILE -->
+            <div class="menu-item">
+              <span class="label">File</span>
+              <div class="menu-dropdown">
+                <div class="menu-item" id="menuOpenBtn">Open File...</div>
+                <div class="menu-item" id="menuUrlBtn">Open URL...</div>
+                <div class="menu-separator"></div>
+                <div class="menu-item" id="menuCloseBtn">Close</div>
+              </div>
+            </div>
+
+            <!-- SETTINGS -->
+            <div class="menu-item">
+              <span class="label">Settings</span>
+              <div class="menu-dropdown">
+                
+                <div class="menu-item">
+                  <span class="label">Render Mode</span>
+                  <span class="menu-arrow">›</span>
+                  <div class="menu-dropdown">
+                    <div class="menu-item" data-action="setRenderMode" data-value="2d">
+                       <span class="menu-checkbox" id="check-render-2d">✓</span> Canvas 2D
+                    </div>
+                    <div class="menu-item" data-action="setRenderMode" data-value="webgl">
+                       <span class="menu-checkbox" id="check-render-webgl"></span> WebGL
+                    </div>
+                  </div>
+                </div>
+
+                <div class="menu-item">
+                    <span class="label">Container Hint</span>
+                    <span class="menu-arrow">›</span>
+                    <div class="menu-dropdown">
+                        <div class="menu-item" data-action="setFormat" data-value="">Auto</div>
+                        <div class="menu-item" data-action="setFormat" data-value="matroska">Matroska / WebM</div>
+                        <div class="menu-item" data-action="setFormat" data-value="mov">MP4 / QuickTime</div>
+                    </div>
+                </div>
+                
+                <div class="menu-item">
+                    <span class="label">Buffer Size</span>
+                    <span class="menu-arrow">›</span>
+                    <div class="menu-dropdown">
+                        <div class="menu-input-wrapper">
+                            <label>Initial Buffer (MB)</label>
+                            <input type="number" id="bufferSizeInput" min="1" max="64" value="4" style="width: 60px; padding: 4px; border-radius: 4px; border: 1px solid #444; background: #222; color: white;">
+                        </div>
+                    </div>
+                </div>
+
+              </div>
+            </div>
+
+            <!-- VIDEO -->
+            <div class="menu-item">
+              <span class="label">Video</span>
+              <div class="menu-dropdown">
+                <div class="menu-item">
+                    <span class="label">Track</span>
+                    <span class="menu-arrow">›</span>
+                    <div class="menu-dropdown" id="videoTrackMenu">
+                        <div class="menu-item" data-value="-1"><span class="menu-checkbox">✓</span> Auto</div>
+                        <!-- Dynamic tracks here -->
+                    </div>
+                </div>
+                
+                <div class="menu-separator"></div>
+
+                <div class="menu-item">
+                    <span class="label">Aspect Ratio</span>
+                    <span class="menu-arrow">›</span>
+                    <div class="menu-dropdown">
+                        <div class="menu-item" data-action="setAspect" data-value="auto">Auto</div>
+                        <div class="menu-item" data-action="setAspect" data-value="16:9">16:9</div>
+                        <div class="menu-item" data-action="setAspect" data-value="4:3">4:3</div>
+                        <div class="menu-item" data-action="setAspect" data-value="fill">Fill</div>
+                        <div class="menu-item" data-action="setAspect" data-value="stretch">Stretch</div>
+                    </div>
+                </div>
+
+                <div class="menu-item">
+                    <span class="label">Filters</span>
+                    <span class="menu-arrow">›</span>
+                    <div class="menu-dropdown">
+                        <div class="menu-input-wrapper">
+                            <label>Brightness</label>
+                            <input type="range" id="brightnessInput" min="0" max="200" value="100">
+                        </div>
+                        <div class="menu-input-wrapper">
+                            <label>Contrast</label>
+                            <input type="range" id="contrastInput" min="0" max="200" value="100">
+                        </div>
+                        <div class="menu-input-wrapper">
+                            <label>Saturation</label>
+                            <input type="range" id="saturationInput" min="0" max="200" value="100">
+                        </div>
+                        <div class="menu-separator"></div>
+                        <div class="menu-item" id="filtersResetBtn">Reset Filters</div>
+                    </div>
+                </div>
+
+              </div>
+            </div>
+
+            <!-- AUDIO -->
+            <div class="menu-item">
+              <span class="label">Audio</span>
+              <div class="menu-dropdown">
+                 <div class="menu-item">
+                    <span class="label">Track</span>
+                    <span class="menu-arrow">›</span>
+                    <div class="menu-dropdown" id="audioTrackMenu">
+                        <div class="menu-item" data-value="-1"><span class="menu-checkbox">✓</span> Auto</div>
+                        <div class="menu-item" data-value="-2"><span class="menu-checkbox"></span> None</div>
+                    </div>
+                 </div>
+                 
+                 <div class="menu-separator"></div>
+
+                 <div class="menu-item">
+                    <span class="label">Delay</span>
+                    <span class="menu-arrow">›</span>
+                    <div class="menu-dropdown">
+                        <div class="menu-input-wrapper">
+                            <label>Audio Delay (ms)</label>
+                            <input type="range" id="audioDelayInput" min="-5000" max="5000" step="50" value="0">
+                            <div id="audioDelayDisplay" style="text-align: right; font-size: 0.7rem; color: #aaa;">0ms</div>
+                        </div>
+                    </div>
+                 </div>
+              </div>
+            </div>
+
+            <!-- SUBTITLES -->
+             <div class="menu-item">
+              <span class="label">Subtitle</span>
+              <div class="menu-dropdown">
+                 <div class="menu-item">
+                    <span class="label">Track</span>
+                    <span class="menu-arrow">›</span>
+                    <div class="menu-dropdown" id="subtitleTrackMenu">
+                        <div class="menu-item" data-value="-2"><span class="menu-checkbox">✓</span> None</div>
+                        <div class="menu-item" data-value="-1"><span class="menu-checkbox"></span> Auto</div>
+                    </div>
+                 </div>
+                 
+                 <div class="menu-item">
+                    <span class="label">Delay</span>
+                    <span class="menu-arrow">›</span>
+                    <div class="menu-dropdown">
+                        <div class="menu-input-wrapper">
+                            <label>Subtitle Delay (ms)</label>
+                            <input type="range" id="subtitleDelayInput" min="-5000" max="5000" step="50" value="0">
+                            <div id="subtitleDelayDisplay" style="text-align: right; font-size: 0.7rem; color: #aaa;">0ms</div>
+                        </div>
+                    </div>
+                 </div>
+              </div>
+            </div>
+            
+            <!-- PLAYBACK -->
+            <div class="menu-item">
+                <span class="label">Playback</span>
+                <div class="menu-dropdown">
+                    <div class="menu-item">
+                        <span class="label">Speed</span>
+                        <span class="menu-arrow">›</span>
+                        <div class="menu-dropdown">
+                            <div class="menu-item" data-action="setSpeed" data-value="0.25">0.25x</div>
+                            <div class="menu-item" data-action="setSpeed" data-value="0.5">0.5x</div>
+                            <div class="menu-item" data-action="setSpeed" data-value="1.0">1.0x (Normal)</div>
+                            <div class="menu-item" data-action="setSpeed" data-value="1.5">1.5x</div>
+                            <div class="menu-item" data-action="setSpeed" data-value="2.0">2.0x</div>
+                        </div>
+                    </div>
+                    <div class="menu-separator"></div>
+                    <div class="menu-item" id="loopToggleBtn"><span class="menu-checkbox" id="loopCheck"></span> Loop (A-B)</div>
+                    <div class="menu-item" id="loopSetABtn">Set Loop Start (A)</div>
+                    <div class="menu-item" id="loopSetBBtn">Set Loop End (B)</div>
+                    <div class="menu-item" id="loopClearBtn">Clear Loop</div>
+                </div>
+            </div>
+
+            <!-- HELP / SHORTCUTS -->
+             <div class="menu-item">
+                <span class="label">Help</span>
+                <div class="menu-dropdown">
+                    <div class="menu-item" id="shortcutsBtn">Keyboard Shortcuts</div>
+                </div>
+             </div>
+
+          </div>
+
+          <!-- Bottom Controls Overlay -->
+          <div class="controls-overlay">
+            <div class="controls-row">
+              <input
+                id="seekRange"
+                type="range"
+                min="0"
+                max="0"
+                step="0.01"
+                value="0"
+                disabled
+              />
+            </div>
+            <div class="controls-row bottom">
+              <div class="controls-left">
+                <button id="overlayPlay" title="Play">
+                   <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                </button>
+                <button id="overlayPause" title="Pause" style="display: none">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                </button>
+                
+                <div class="volume-control">
+                  <button id="overlayMute" title="Mute">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
+                  </button>
+                  <input id="overlayVolume" type="range" min="0" max="1" step="0.01" value="0.8" />
+                </div>
+
+                <div class="time-display">
+                  <span id="timeCurrent">0:00</span> /
+                  <span id="timeTotal">--:--</span>
+                </div>
+              </div>
+
+              <div class="controls-right">
+                <span id="speedDisplay" class="speed-display" title="Playback speed">1x</span>
+                <button id="screenshotBtn" title="Screenshot (S)">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                </button>
+                <button id="overlayFullscreen" title="Fullscreen (F)">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Info Panel (Below Video) -->
+        <div class="info-panel">
+            <div class="panel">
+                <div class="panel-header">Statistics</div>
+                <div class="stats-grid">
+                  <div class="stat-item">
+                    <span class="stat-label">Resolution</span>
+                    <span class="stat-value" id="resolution">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Frames</span>
+                    <span class="stat-value" id="frameCount">0</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Buffered</span>
+                    <span class="stat-value" id="bytesCount">0 B</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">PTS</span>
+                    <span class="stat-value" id="ptsValue">0.00s</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Audio</span>
+                    <span class="stat-value" id="audioInfo">-</span>
+                  </div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">Logs</div>
+                <pre id="log" class="log-container"></pre>
+            </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Hidden Logic Elements -->
+    <div style="display: none;">
+        <input id="fileInput" type="file" accept="video/*,.mkv,video/x-matroska" />
+        <button id="startBtn">Start</button>
+        <button id="pauseBtn">Pause</button>
+        <button id="stopBtn">Stop</button>
+    </div>
+
+    <!-- URL Modal -->
+    <div class="modal-overlay" id="urlModal">
+        <div class="modal">
+            <div class="modal-header">Open URL</div>
+            <div class="modal-body">
+                <input type="url" id="urlInput" placeholder="https://example.com/video.mkv" />
+                <p style="font-size: 0.8rem; color: #aaa; margin-bottom: 16px;">
+                    Note: The server must support CORS (Access-Control-Allow-Origin).
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-text" id="urlCancelBtn">Cancel</button>
+                <button class="btn-primary" id="urlLoadBtn" style="background: var(--primary-color); color: white; padding: 6px 12px; border-radius: 4px;">Load</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Shortcuts Modal (Reusing structure) -->
+    <div class="modal-overlay" id="shortcutsModal">
+        <div class="modal" style="width: 500px;">
+            <div class="modal-header">Keyboard Shortcuts</div>
+            <div class="modal-body" style="max-height: 300px; overflow-y: auto;">
+                <div class="shortcuts-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                     <div class="shortcut"><kbd>Space</kbd> Play/Pause</div>
+                    <div class="shortcut"><kbd>←</kbd><kbd>→</kbd> Seek ±5s</div>
+                    <div class="shortcut"><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> ±30s</div>
+                    <div class="shortcut"><kbd>J</kbd><kbd>L</kbd> Seek ±10s</div>
+                    <div class="shortcut"><kbd>↑</kbd><kbd>↓</kbd> Volume</div>
+                    <div class="shortcut"><kbd>M</kbd> Mute</div>
+                    <div class="shortcut"><kbd>F</kbd> Fullscreen</div>
+                    <div class="shortcut"><kbd>S</kbd> Screenshot</div>
+                    <div class="shortcut"><kbd>[</kbd><kbd>]</kbd> Speed</div>
+                    <div class="shortcut"><kbd>\</kbd> Reset speed</div>
+                    <div class="shortcut"><kbd>A</kbd><kbd>B</kbd> Loop points</div>
+                    <div class="shortcut"><kbd>P</kbd> Toggle loop</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-text" id="shortcutsCloseBtn">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="app-v3.js"></script>
+  </body>
+</html>

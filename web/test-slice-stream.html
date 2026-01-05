@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>File.slice() Stream Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    #log { white-space: pre-wrap; background: #f0f0f0; padding: 10px; max-height: 500px; overflow: auto; }
+    .pass { color: green; }
+    .fail { color: red; }
+  </style>
+</head>
+<body>
+  <h1>File.slice() + WASM Stream Test</h1>
+  <p>Tests streaming partial file data starting from an offset.</p>
+  <input type="file" id="fileInput" accept="video/*">
+  <br><br>
+  <label>Skip to (% of file): <input type="number" id="skipPercent" value="50" min="0" max="99"></label>
+  <br><br>
+  <button id="testBtn" disabled>Test Sliced Stream</button>
+  <button id="clearBtn">Clear Log</button>
+  <br><br>
+  <div id="log"></div>
+
+  <script src="ffmpeg_wasm.js"></script>
+  <script>
+    const log = (msg, cls = '') => {
+      const el = document.getElementById('log');
+      if (cls) {
+        el.innerHTML += `<span class="${cls}">${msg}</span>\n`;
+      } else {
+        el.textContent += msg + '\n';
+      }
+      el.scrollTop = el.scrollHeight;
+      console.log(msg);
+    };
+
+    let Module = null;
+    let api = null;
+    let file = null;
+
+    FFmpegWasm().then(m => {
+      Module = m;
+      api = {
+        create: Module.cwrap("ffmpeg_wasm_create", "number", ["number"]),
+        destroy: Module.cwrap("ffmpeg_wasm_destroy", null, ["number"]),
+        append: Module.cwrap("ffmpeg_wasm_append", "number", ["number", "number", "number"]),
+        setEof: Module.cwrap("ffmpeg_wasm_set_eof", null, ["number"]),
+        open: Module.cwrap("ffmpeg_wasm_open", "number", ["number", "string"]),
+        setFileSize: Module.cwrap("ffmpeg_wasm_set_file_size", null, ["number", "number"]),
+        setBufferOffset: Module.cwrap("ffmpeg_wasm_set_buffer_offset", null, ["number", "number"]),
+        bufferedBytes: Module.cwrap("ffmpeg_wasm_buffered_bytes", "number", ["number"]),
+        duration: Module.cwrap("ffmpeg_wasm_duration_seconds", "number", ["number"]),
+        readFrame: Module.cwrap("ffmpeg_wasm_read_frame", "number", ["number"]),
+        pts: Module.cwrap("ffmpeg_wasm_frame_pts_seconds", "number", ["number"]),
+        width: Module.cwrap("ffmpeg_wasm_video_width", "number", ["number"]),
+        height: Module.cwrap("ffmpeg_wasm_video_height", "number", ["number"]),
+      };
+      log("WASM Module loaded");
+      document.getElementById('testBtn').disabled = false;
+    });
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      file = e.target.files[0];
+      if (file) {
+        log(`Selected: ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)`);
+      }
+    });
+
+    const appendData = (ctx, data) => {
+      const ptr = Module._malloc(data.length);
+      Module.HEAPU8.set(data, ptr);
+      const ret = api.append(ctx, ptr, data.length);
+      Module._free(ptr);
+      return ret;
+    };
+
+    document.getElementById('testBtn').addEventListener('click', async () => {
+      if (!file) {
+        log("Select a file first");
+        return;
+      }
+
+      const skipPercent = parseInt(document.getElementById('skipPercent').value) || 50;
+      const skipBytes = Math.floor((skipPercent / 100) * file.size);
+      const alignedSkip = Math.floor(skipBytes / (1024 * 1024)) * (1024 * 1024);
+
+      log(`\n=== Streaming from ${skipPercent}% (byte ${alignedSkip}) ===`);
+
+      // Use File.slice() - this is what the worker does
+      const slicedFile = file.slice(alignedSkip);
+      log(`file.slice(${alignedSkip}) created: ${slicedFile.size} bytes`);
+
+      const ctx = api.create(4 * 1024 * 1024);
+      if (!ctx) {
+        log("Failed to create context", 'fail');
+        return;
+      }
+
+      api.setFileSize(ctx, file.size);
+      api.setBufferOffset(ctx, alignedSkip);
+      log(`setFileSize(${file.size}), setBufferOffset(${alignedSkip})`);
+
+      // Stream the sliced file
+      const reader = slicedFile.stream().getReader();
+      let totalRead = 0;
+      let chunks = 0;
+
+      log("Streaming data...");
+      const startTime = performance.now();
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        const ret = appendData(ctx, value);
+        if (ret < 0) {
+          log(`Append failed at ${totalRead} bytes: ${ret}`, 'fail');
+          break;
+        }
+        totalRead += value.length;
+        chunks++;
+
+        // Try to open periodically
+        if (totalRead > 2 * 1024 * 1024 && chunks % 10 === 0) {
+          const openRet = api.open(ctx, null);
+          if (openRet === 0) {
+            const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+            log(`Opened after ${(totalRead/1024/1024).toFixed(1)}MB, ${elapsed}s`);
+
+            const duration = api.duration(ctx);
+            log(`Duration: ${duration.toFixed(2)}s`);
+
+            // Try to decode a frame
+            for (let i = 0; i < 500; i++) {
+              const ret = api.readFrame(ctx);
+              if (ret === 1) {
+                const pts = api.pts(ctx);
+                const w = api.width(ctx);
+                const h = api.height(ctx);
+                log(`First video frame: PTS=${pts.toFixed(3)}s, ${w}x${h}`, 'pass');
+
+                if (pts > 1) {
+                  log(`SUCCESS: PTS ${pts.toFixed(2)}s is past the start!`, 'pass');
+                } else {
+                  log(`WARNING: PTS is near 0, offset may not be working`, 'fail');
+                }
+                break;
+              }
+              if (ret === 2) continue; // audio
+              if (ret < 0) {
+                log(`Decode ended: ${ret}`);
+                break;
+              }
+            }
+            break;
+          }
+        }
+
+        // Limit for testing
+        if (totalRead > 50 * 1024 * 1024) {
+          log("Streamed 50MB, stopping test");
+          api.setEof(ctx);
+          const openRet = api.open(ctx, null);
+          log(`Final open attempt: ${openRet}`);
+          break;
+        }
+      }
+
+      log(`Total streamed: ${(totalRead/1024/1024).toFixed(1)}MB in ${chunks} chunks`);
+      api.destroy(ctx);
+      log("Done");
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      document.getElementById('log').textContent = '';
+    });
+  </script>
+</body>
+</html>

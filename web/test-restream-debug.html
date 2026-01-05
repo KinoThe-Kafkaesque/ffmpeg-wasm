@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Restream Debug</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    #log { white-space: pre-wrap; background: #f0f0f0; padding: 10px; max-height: 600px; overflow: auto; }
+    .pass { color: green; }
+    .fail { color: red; }
+    .warn { color: orange; }
+  </style>
+</head>
+<body>
+  <h1>Restream Debug Test</h1>
+  <input type="file" id="fileInput" accept="video/*">
+  <br><br>
+  <button id="testBtn" disabled>Run Debug Test</button>
+  <button id="clearBtn">Clear</button>
+  <br><br>
+  <div id="log"></div>
+
+  <script src="ffmpeg_wasm.js"></script>
+  <script>
+    const log = (msg, cls = '') => {
+      const el = document.getElementById('log');
+      if (cls) {
+        el.innerHTML += `<span class="${cls}">${msg}</span>\n`;
+      } else {
+        el.textContent += msg + '\n';
+      }
+      el.scrollTop = el.scrollHeight;
+    };
+
+    let Module, api, file;
+
+    FFmpegWasm().then(m => {
+      Module = m;
+      api = {
+        create: Module.cwrap("ffmpeg_wasm_create", "number", ["number"]),
+        destroy: Module.cwrap("ffmpeg_wasm_destroy", null, ["number"]),
+        append: Module.cwrap("ffmpeg_wasm_append", "number", ["number", "number", "number"]),
+        setEof: Module.cwrap("ffmpeg_wasm_set_eof", null, ["number"]),
+        open: Module.cwrap("ffmpeg_wasm_open", "number", ["number", "string"]),
+        setFileSize: Module.cwrap("ffmpeg_wasm_set_file_size", null, ["number", "number"]),
+        bufferedBytes: Module.cwrap("ffmpeg_wasm_buffered_bytes", "number", ["number"]),
+        duration: Module.cwrap("ffmpeg_wasm_duration_seconds", "number", ["number"]),
+        readFrame: Module.cwrap("ffmpeg_wasm_read_frame", "number", ["number"]),
+        pts: Module.cwrap("ffmpeg_wasm_frame_pts_seconds", "number", ["number"]),
+        prepareRestream: Module.cwrap("ffmpeg_wasm_prepare_restream", "number", ["number", "number"]),
+      };
+      log("Ready");
+      document.getElementById('testBtn').disabled = false;
+    });
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      file = e.target.files[0];
+      if (file) log(`File: ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)`);
+    });
+
+    const append = (ctx, data) => {
+      const ptr = Module._malloc(data.length);
+      Module.HEAPU8.set(data, ptr);
+      const ret = api.append(ctx, ptr, data.length);
+      Module._free(ptr);
+      return ret;
+    };
+
+    document.getElementById('testBtn').addEventListener('click', async () => {
+      if (!file) return log("No file");
+
+      const ctx = api.create(8 * 1024 * 1024);
+      api.setFileSize(ctx, file.size);
+
+      // Phase 1: Open normally
+      log("\n=== Phase 1: Open ===");
+      const reader1 = file.stream().getReader();
+      let bytes = 0;
+      let opened = false;
+
+      while (bytes < 10 * 1024 * 1024) {
+        const { value, done } = await reader1.read();
+        if (done) break;
+        append(ctx, value);
+        bytes += value.length;
+        if (bytes > 2 * 1024 * 1024 && !opened) {
+          const ret = api.open(ctx, null);
+          if (ret === 0) {
+            opened = true;
+            log(`Opened at ${(bytes/1024/1024).toFixed(1)}MB`, 'pass');
+            break;
+          }
+        }
+      }
+      await reader1.cancel();
+
+      if (!opened) {
+        log("Failed to open", 'fail');
+        api.destroy(ctx);
+        return;
+      }
+
+      const duration = api.duration(ctx);
+      log(`Duration: ${duration.toFixed(2)}s`);
+
+      // Decode some frames
+      log("\nDecoding initial frames...");
+      for (let i = 0; i < 50; i++) {
+        const ret = api.readFrame(ctx);
+        if (ret === 1) {
+          log(`  Frame ${i}: PTS=${api.pts(ctx).toFixed(3)}s`);
+          if (i >= 2) break;
+        }
+      }
+
+      // Phase 2: prepareRestream
+      log("\n=== Phase 2: prepareRestream ===");
+      const targetTime = duration * 0.5;
+      const byteOffset = Math.floor((targetTime / duration) * file.size);
+      const aligned = Math.floor(byteOffset / (1024*1024)) * (1024*1024);
+
+      log(`Target: ${targetTime.toFixed(1)}s, Byte offset: ${aligned}`);
+      const ret = api.prepareRestream(ctx, aligned);
+      log(`prepareRestream returned: ${ret}`);
+      log(`Buffered bytes after reset: ${api.bufferedBytes(ctx)}`);
+
+      // Phase 3: Stream new data and try to decode
+      log("\n=== Phase 3: Stream + Decode ===");
+      const sliced = file.slice(aligned);
+      const reader2 = sliced.stream().getReader();
+
+      let newBytes = 0;
+      let attempts = 0;
+      const maxAttempts = 20;
+
+      while (attempts < maxAttempts) {
+        attempts++;
+
+        // Read some data
+        log(`\nAttempt ${attempts}:`);
+        for (let i = 0; i < 5; i++) {
+          const { value, done } = await reader2.read();
+          if (done) {
+            log("  EOF reached");
+            api.setEof(ctx);
+            break;
+          }
+          const appendRet = append(ctx, value);
+          newBytes += value.length;
+          log(`  Appended ${value.length} bytes (total: ${(newBytes/1024/1024).toFixed(2)}MB), ret=${appendRet}`);
+          if (appendRet < 0) {
+            log(`  Append failed!`, 'fail');
+            break;
+          }
+        }
+
+        log(`  Buffered: ${api.bufferedBytes(ctx)} bytes`);
+
+        // Try to decode
+        log(`  Trying readFrame...`);
+        for (let i = 0; i < 20; i++) {
+          const ret = api.readFrame(ctx);
+          if (ret === 1) {
+            const pts = api.pts(ctx);
+            log(`  GOT FRAME! PTS=${pts.toFixed(3)}s`, 'pass');
+            if (pts > 10) {
+              log(`\nSUCCESS: Jumped to ${pts.toFixed(1)}s`, 'pass');
+              await reader2.cancel();
+              api.destroy(ctx);
+              return;
+            }
+          } else if (ret === 2) {
+            log(`  Audio frame`);
+          } else if (ret === 0) {
+            log(`  readFrame=0 (need data)`, 'warn');
+            break;
+          } else {
+            log(`  readFrame=${ret}`, 'fail');
+            break;
+          }
+        }
+
+        if (newBytes > 20 * 1024 * 1024) {
+          log("Streamed 20MB, stopping", 'warn');
+          break;
+        }
+      }
+
+      await reader2.cancel();
+      api.destroy(ctx);
+      log("\nDone");
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      document.getElementById('log').textContent = '';
+    });
+  </script>
+</body>
+</html>

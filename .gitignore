@@ -28,3 +28,5 @@ yarn-error.log*
 /web-react/dist/
 /web-react/.vite/
 /third_party
+/.cache
+ffmpeg_wasm.o

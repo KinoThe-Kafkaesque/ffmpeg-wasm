@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Restream Seek Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    #log { white-space: pre-wrap; background: #f0f0f0; padding: 10px; max-height: 600px; overflow: auto; }
+    .pass { color: green; font-weight: bold; }
+    .fail { color: red; font-weight: bold; }
+    .info { color: blue; }
+  </style>
+</head>
+<body>
+  <h1>Restream Seek Test</h1>
+  <p>Tests: open file normally, then use prepareRestream() to seek without re-opening.</p>
+  <input type="file" id="fileInput" accept="video/*">
+  <br><br>
+  <label>Seek to (% of duration): <input type="number" id="seekPercent" value="50" min="1" max="99"></label>
+  <br><br>
+  <button id="testBtn" disabled>Run Restream Test</button>
+  <button id="clearBtn">Clear Log</button>
+  <br><br>
+  <div id="log"></div>
+
+  <script src="ffmpeg_wasm.js"></script>
+  <script>
+    const log = (msg, cls = '') => {
+      const el = document.getElementById('log');
+      const time = new Date().toLocaleTimeString();
+      if (cls) {
+        el.innerHTML += `<span class="${cls}">[${time}] ${msg}</span>\n`;
+      } else {
+        el.textContent += `[${time}] ${msg}\n`;
+      }
+      el.scrollTop = el.scrollHeight;
+      console.log(msg);
+    };
+
+    let Module = null;
+    let api = null;
+    let file = null;
+
+    FFmpegWasm().then(m => {
+      Module = m;
+      api = {
+        create: Module.cwrap("ffmpeg_wasm_create", "number", ["number"]),
+        destroy: Module.cwrap("ffmpeg_wasm_destroy", null, ["number"]),
+        append: Module.cwrap("ffmpeg_wasm_append", "number", ["number", "number", "number"]),
+        setEof: Module.cwrap("ffmpeg_wasm_set_eof", null, ["number"]),
+        open: Module.cwrap("ffmpeg_wasm_open", "number", ["number", "string"]),
+        setFileSize: Module.cwrap("ffmpeg_wasm_set_file_size", null, ["number", "number"]),
+        bufferedBytes: Module.cwrap("ffmpeg_wasm_buffered_bytes", "number", ["number"]),
+        duration: Module.cwrap("ffmpeg_wasm_duration_seconds", "number", ["number"]),
+        readFrame: Module.cwrap("ffmpeg_wasm_read_frame", "number", ["number"]),
+        pts: Module.cwrap("ffmpeg_wasm_frame_pts_seconds", "number", ["number"]),
+        width: Module.cwrap("ffmpeg_wasm_video_width", "number", ["number"]),
+        height: Module.cwrap("ffmpeg_wasm_video_height", "number", ["number"]),
+        prepareRestream: Module.cwrap("ffmpeg_wasm_prepare_restream", "number", ["number", "number"]),
+      };
+      log("WASM Module loaded");
+      document.getElementById('testBtn').disabled = false;
+    });
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      file = e.target.files[0];
+      if (file) {
+        log(`Selected: ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)`);
+      }
+    });
+
+    const appendData = (ctx, data) => {
+      const ptr = Module._malloc(data.length);
+      Module.HEAPU8.set(data, ptr);
+      const ret = api.append(ctx, ptr, data.length);
+      Module._free(ptr);
+      return ret;
+    };
+
+    const streamUntilOpen = async (ctx, reader, maxBytes = 10 * 1024 * 1024) => {
+      let totalRead = 0;
+      while (totalRead < maxBytes) {
+        const { value, done } = await reader.read();
+        if (done) {
+          api.setEof(ctx);
+          break;
+        }
+        const ret = appendData(ctx, value);
+        if (ret < 0) return { ok: false, error: ret, bytesRead: totalRead };
+        totalRead += value.length;
+
+        if (totalRead > 2 * 1024 * 1024) {
+          const openRet = api.open(ctx, null);
+          if (openRet === 0) {
+            return { ok: true, bytesRead: totalRead, reader };
+          }
+        }
+      }
+      return { ok: false, error: 'max bytes reached', bytesRead: totalRead };
+    };
+
+    const decodeFrames = (ctx, count = 10) => {
+      const frames = [];
+      for (let i = 0; i < count * 10; i++) {
+        const ret = api.readFrame(ctx);
+        if (ret === 1) {
+          frames.push(api.pts(ctx));
+          if (frames.length >= count) break;
+        } else if (ret === 2) {
+          continue; // audio
+        } else if (ret === 0) {
+          break; // need more data
+        } else {
+          break; // error/eof
+        }
+      }
+      return frames;
+    };
+
+    const streamAndDecode = async (ctx, reader, targetPts, maxBytes = 50 * 1024 * 1024) => {
+      let totalRead = 0;
+      let lastPts = -1;
+      let frameCount = 0;
+
+      while (totalRead < maxBytes) {
+        // Try to decode available frames
+        for (let i = 0; i < 100; i++) {
+          const ret = api.readFrame(ctx);
+          if (ret === 1) {
+            lastPts = api.pts(ctx);
+            frameCount++;
+            if (lastPts >= targetPts) {
+              return { ok: true, pts: lastPts, frames: frameCount, bytesRead: totalRead };
+            }
+          } else if (ret === 2) {
+            continue;
+          } else {
+            break;
+          }
+        }
+
+        // Read more data
+        const { value, done } = await reader.read();
+        if (done) {
+          api.setEof(ctx);
+          // Drain remaining
+          for (let i = 0; i < 1000; i++) {
+            const ret = api.readFrame(ctx);
+            if (ret === 1) {
+              lastPts = api.pts(ctx);
+              frameCount++;
+              if (lastPts >= targetPts) {
+                return { ok: true, pts: lastPts, frames: frameCount, bytesRead: totalRead };
+              }
+            } else if (ret === 2) continue;
+            else break;
+          }
+          return { ok: false, pts: lastPts, frames: frameCount, bytesRead: totalRead, reason: 'EOF' };
+        }
+
+        appendData(ctx, value);
+        totalRead += value.length;
+      }
+      return { ok: false, pts: lastPts, frames: frameCount, bytesRead: totalRead, reason: 'max bytes' };
+    };
+
+    document.getElementById('testBtn').addEventListener('click', async () => {
+      if (!file) {
+        log("Select a file first");
+        return;
+      }
+
+      const seekPercent = parseInt(document.getElementById('seekPercent').value) || 50;
+      log(`\n${'='.repeat(60)}`);
+      log(`RESTREAM SEEK TEST - Seeking to ${seekPercent}% of duration`);
+      log(`${'='.repeat(60)}`);
+
+      // PHASE 1: Open file normally
+      log("\n--- PHASE 1: Initial open ---", 'info');
+      const ctx = api.create(8 * 1024 * 1024);
+      api.setFileSize(ctx, file.size);
+
+      const reader1 = file.stream().getReader();
+      const openResult = await streamUntilOpen(ctx, reader1);
+
+      if (!openResult.ok) {
+        log(`Failed to open: ${openResult.error}`, 'fail');
+        api.destroy(ctx);
+        return;
+      }
+
+      const duration = api.duration(ctx);
+      const w = api.width(ctx);
+      const h = api.height(ctx);
+      log(`Opened! Duration: ${duration.toFixed(2)}s, Resolution: ${w}x${h}`, 'pass');
+
+      // Decode a few frames to verify
+      const initialFrames = decodeFrames(ctx, 3);
+      log(`Initial frames PTS: ${initialFrames.map(p => p.toFixed(3)).join(', ')}s`);
+
+      // Cancel the first reader
+      await openResult.reader.cancel();
+
+      // PHASE 2: Calculate seek position
+      log("\n--- PHASE 2: Prepare restream ---", 'info');
+      const targetPts = (seekPercent / 100) * duration;
+      const seekBackSeconds = 5;
+      const estimatedTime = Math.max(0, targetPts - seekBackSeconds);
+      const byteOffset = Math.floor((estimatedTime / duration) * file.size);
+      const alignedOffset = Math.floor(byteOffset / (1024 * 1024)) * (1024 * 1024);
+
+      log(`Target PTS: ${targetPts.toFixed(2)}s`);
+      log(`Estimated start time: ${estimatedTime.toFixed(2)}s`);
+      log(`Byte offset: ${alignedOffset} (${(alignedOffset/1024/1024).toFixed(1)}MB)`);
+
+      // PHASE 3: Call prepareRestream
+      const restreamRet = api.prepareRestream(ctx, alignedOffset);
+      if (restreamRet < 0) {
+        log(`prepareRestream failed: ${restreamRet}`, 'fail');
+        api.destroy(ctx);
+        return;
+      }
+      log(`prepareRestream() returned: ${restreamRet}`, 'pass');
+
+      // PHASE 4: Stream from new position
+      log("\n--- PHASE 3: Stream from new position ---", 'info');
+      const slicedFile = file.slice(alignedOffset);
+      log(`file.slice(${alignedOffset}): ${slicedFile.size} bytes`);
+
+      const reader2 = slicedFile.stream().getReader();
+      const seekResult = await streamAndDecode(ctx, reader2, targetPts);
+
+      if (seekResult.ok) {
+        log(`\nSUCCESS!`, 'pass');
+        log(`  Reached PTS: ${seekResult.pts.toFixed(3)}s (target: ${targetPts.toFixed(2)}s)`);
+        log(`  Frames decoded: ${seekResult.frames}`);
+        log(`  Bytes read: ${(seekResult.bytesRead/1024/1024).toFixed(1)}MB`);
+
+        if (seekResult.pts > estimatedTime) {
+          log(`\n  Restream seek is WORKING - we jumped to ${seekResult.pts.toFixed(1)}s!`, 'pass');
+        }
+      } else {
+        log(`\nFailed to reach target PTS`, 'fail');
+        log(`  Last PTS: ${seekResult.pts?.toFixed(3) || 'N/A'}s`);
+        log(`  Frames: ${seekResult.frames}`);
+        log(`  Reason: ${seekResult.reason}`);
+      }
+
+      await reader2.cancel();
+      api.destroy(ctx);
+      log("\nTest complete");
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      document.getElementById('log').textContent = '';
+    });
+  </script>
+</body>
+</html>
