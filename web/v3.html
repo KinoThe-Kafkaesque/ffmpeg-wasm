@@ -208,6 +208,13 @@
                             <div class="menu-item" data-action="setSpeed" data-value="2.0">2.0x</div>
                         </div>
                     </div>
+                    <div class="menu-item">
+                        <span class="label">Chapters</span>
+                        <span class="menu-arrow">›</span>
+                        <div class="menu-dropdown" id="chapterMenu">
+                            <div class="menu-item menu-item-static">No chapters detected</div>
+                        </div>
+                    </div>
                     <div class="menu-separator"></div>
                     <div class="menu-item" id="loopToggleBtn"><span class="menu-checkbox" id="loopCheck"></span> Loop (A-B)</div>
                     <div class="menu-item" id="loopSetABtn">Set Loop Start (A)</div>
@@ -304,6 +311,11 @@
             <div class="panel">
                 <div class="panel-header">Logs</div>
                 <pre id="log" class="log-container"></pre>
+            </div>
+            <div class="panel">
+                <div class="panel-header">Attachments <span id="attachmentCount">0</span></div>
+                <div id="attachmentInfo" class="attachment-info">No attachments detected.</div>
+                <div id="attachmentList" class="attachment-list"></div>
             </div>
         </div>
       </main>

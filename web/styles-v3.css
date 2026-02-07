@@ -227,6 +227,15 @@ canvas.is-hidden {
     background-color: rgba(255, 255, 255, 0.1);
 }
 
+.menu-dropdown .menu-item.menu-item-static {
+    cursor: default;
+    color: var(--text-secondary);
+}
+
+.menu-dropdown .menu-item.menu-item-static:hover {
+    background-color: transparent;
+}
+
 .menu-dropdown .menu-dropdown {
     top: 0;
     left: 100%;
@@ -425,7 +434,7 @@ input[type="range"]:hover::-webkit-slider-thumb {
 /* Info Panel (Below Player) */
 .info-panel {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: var(--spacing-md);
 }
 
@@ -482,6 +491,40 @@ input[type="range"]:hover::-webkit-slider-thumb {
   font-size: 0.8rem;
   color: var(--text-secondary);
   white-space: pre-wrap;
+}
+
+.attachment-info {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-bottom: var(--spacing-sm);
+}
+
+.attachment-list {
+  display: grid;
+  gap: var(--spacing-xs);
+  max-height: 200px;
+  overflow: auto;
+}
+
+.attachment-item {
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+}
+
+.attachment-name {
+  display: block;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.75rem;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.attachment-meta {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
 }
 
 /* Modal for URL */

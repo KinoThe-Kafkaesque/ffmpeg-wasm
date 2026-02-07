@@ -3,6 +3,7 @@
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>
 #include <libavutil/avutil.h>
+#include <libavutil/avstring.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
@@ -12,10 +13,17 @@
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 #include <ass/ass.h>
+#include <errno.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define FFMPEG_WASM_IO_APPEND_STREAM 0
+#define FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL 1
+#define FFMPEG_WASM_DEFAULT_CACHE_LIMIT (384 * 1024 * 1024)
+#define FFMPEG_WASM_MIN_READ_WINDOW (8 * 1024 * 1024)
 
 typedef struct StreamBuffer {
   uint8_t *data;
@@ -32,6 +40,13 @@ typedef struct StreamBuffer {
 
 typedef struct FFmpegWasmContext {
   StreamBuffer buffer;
+  int io_mode;
+  size_t cache_limit;
+  uint8_t *ra_cache_data;
+  size_t ra_cache_size;
+  size_t ra_cache_capacity;
+  int64_t ra_cache_start;
+  int64_t ra_pos;
   AVIOContext *avio;
   AVFormatContext *fmt;
   AVPacket *packet;
@@ -76,7 +91,28 @@ typedef struct FFmpegWasmContext {
   int subtitle_stream_index;
   AVCodecContext *subtitle_codec;
   int subtitles_enabled;
+  int attachment_fonts_loaded;
 } FFmpegWasmContext;
+
+EM_JS(int, ffmpeg_wasm_read_at_bridge, (double offset, int len, int dst_ptr), {
+  if (typeof Module === "undefined" || typeof Module.ffmpegReadAt !== "function") {
+    return -38; // ENOSYS
+  }
+  try {
+    const ret = Module.ffmpegReadAt(offset, len, dst_ptr);
+    if (typeof ret === "number") {
+      return ret | 0;
+    }
+    if (ret && typeof ret.byteLength === "number") {
+      const bytes = ret instanceof Uint8Array ? ret : new Uint8Array(ret);
+      HEAPU8.set(bytes, dst_ptr);
+      return bytes.byteLength | 0;
+    }
+    return -5; // EIO
+  } catch (e) {
+    return -5; // EIO
+  }
+});
 
 static int ensure_capacity(StreamBuffer *buffer, size_t needed) {
   if (!buffer) {
@@ -181,8 +217,7 @@ static void enforce_buffer_limit(StreamBuffer *buffer) {
   buffer->offset += (int64_t)drop;
 }
 
-static int read_packet(void *opaque, uint8_t *buf, int buf_size) {
-  StreamBuffer *buffer = (StreamBuffer *)opaque;
+static int read_packet_append(StreamBuffer *buffer, uint8_t *buf, int buf_size) {
   if (!buffer || buf_size <= 0) {
     return 0;
   }
@@ -203,14 +238,13 @@ static int read_packet(void *opaque, uint8_t *buf, int buf_size) {
   return (int)to_copy;
 }
 
-static int64_t seek_stream(void *opaque, int64_t offset, int whence) {
-  StreamBuffer *buffer = (StreamBuffer *)opaque;
+static int64_t seek_stream_append(StreamBuffer *buffer, int64_t offset, int whence) {
   if (!buffer) {
     return -1;
   }
 
   if (whence == AVSEEK_SIZE) {
-    if (buffer->total_size > 0) {
+    if (buffer->total_size >= 0) {
       return buffer->total_size;  // Return known file size
     }
     return buffer->eof ? (int64_t)(buffer->offset + (int64_t)buffer->size) : -1;
@@ -226,10 +260,14 @@ static int64_t seek_stream(void *opaque, int64_t offset, int whence) {
       new_pos = current + offset;
       break;
     case SEEK_END:
-      if (!buffer->eof) {
-        return -1;
+      if (buffer->total_size >= 0) {
+        new_pos = buffer->total_size + offset;
+      } else {
+        if (!buffer->eof) {
+          return -1;
+        }
+        new_pos = buffer->offset + (int64_t)buffer->size + offset;
       }
-      new_pos = buffer->offset + (int64_t)buffer->size + offset;
       break;
     default:
       return -1;
@@ -241,6 +279,180 @@ static int64_t seek_stream(void *opaque, int64_t offset, int whence) {
 
   buffer->read_pos = (size_t)(new_pos - buffer->offset);
   return new_pos;
+}
+
+static int random_access_refill_cache(FFmpegWasmContext *ctx, int64_t pos, size_t min_len) {
+  if (!ctx) {
+    return AVERROR(EINVAL);
+  }
+  if (pos < 0) {
+    return AVERROR(EINVAL);
+  }
+  if (ctx->buffer.total_size >= 0 && pos >= ctx->buffer.total_size) {
+    ctx->buffer.eof = 1;
+    return AVERROR_EOF;
+  }
+
+  size_t window = ctx->cache_limit ? ctx->cache_limit : (size_t)FFMPEG_WASM_DEFAULT_CACHE_LIMIT;
+  if (window > (size_t)INT_MAX) {
+    window = (size_t)INT_MAX;
+  }
+  if (window < (size_t)FFMPEG_WASM_MIN_READ_WINDOW) {
+    window = (size_t)FFMPEG_WASM_MIN_READ_WINDOW;
+  }
+  if (window < min_len) {
+    window = min_len;
+  }
+  if (window > (size_t)INT_MAX) {
+    window = (size_t)INT_MAX;
+  }
+
+  if (ctx->buffer.total_size >= 0) {
+    int64_t remain = ctx->buffer.total_size - pos;
+    if (remain <= 0) {
+      ctx->buffer.eof = 1;
+      return AVERROR_EOF;
+    }
+    if ((int64_t)window > remain) {
+      window = (size_t)remain;
+    }
+  }
+
+  if (window == 0) {
+    return AVERROR_EOF;
+  }
+
+  if (ctx->ra_cache_capacity < window) {
+    uint8_t *new_data = av_realloc(ctx->ra_cache_data, window);
+    if (!new_data) {
+      return AVERROR(ENOMEM);
+    }
+    ctx->ra_cache_data = new_data;
+    ctx->ra_cache_capacity = window;
+  }
+
+  int bytes_read = ffmpeg_wasm_read_at_bridge((double)pos, (int)window, (int)(uintptr_t)ctx->ra_cache_data);
+  if (bytes_read < 0) {
+    return bytes_read;
+  }
+  if (bytes_read == 0) {
+    ctx->buffer.eof = 1;
+    return AVERROR_EOF;
+  }
+
+  ctx->ra_cache_start = pos;
+  ctx->ra_cache_size = (size_t)bytes_read;
+  ctx->buffer.eof = 0;
+  return bytes_read;
+}
+
+static int read_packet_random_access(FFmpegWasmContext *ctx, uint8_t *buf, int buf_size) {
+  if (!ctx || !buf || buf_size <= 0) {
+    return 0;
+  }
+
+  if (ctx->buffer.total_size >= 0 && ctx->ra_pos >= ctx->buffer.total_size) {
+    ctx->buffer.eof = 1;
+    return AVERROR_EOF;
+  }
+
+  int copied = 0;
+  while (copied < buf_size) {
+    int64_t cache_end = ctx->ra_cache_start + (int64_t)ctx->ra_cache_size;
+    if (ctx->ra_cache_size == 0 || ctx->ra_pos < ctx->ra_cache_start || ctx->ra_pos >= cache_end) {
+      int ret = random_access_refill_cache(ctx, ctx->ra_pos, (size_t)(buf_size - copied));
+      if (ret == AVERROR_EOF) {
+        return copied > 0 ? copied : AVERROR_EOF;
+      }
+      if (ret < 0) {
+        return copied > 0 ? copied : ret;
+      }
+      cache_end = ctx->ra_cache_start + (int64_t)ctx->ra_cache_size;
+    }
+
+    size_t cache_pos = (size_t)(ctx->ra_pos - ctx->ra_cache_start);
+    size_t available = ctx->ra_cache_size - cache_pos;
+    if (available == 0) {
+      break;
+    }
+
+    size_t need = (size_t)(buf_size - copied);
+    size_t to_copy = available < need ? available : need;
+    memcpy(buf + copied, ctx->ra_cache_data + cache_pos, to_copy);
+    ctx->ra_pos += (int64_t)to_copy;
+    copied += (int)to_copy;
+  }
+
+  if (copied > 0) {
+    return copied;
+  }
+  return AVERROR(EAGAIN);
+}
+
+static int64_t seek_stream_random_access(FFmpegWasmContext *ctx, int64_t offset, int whence) {
+  if (!ctx) {
+    return -1;
+  }
+
+  if (whence == AVSEEK_SIZE) {
+    return ctx->buffer.total_size >= 0 ? ctx->buffer.total_size : -1;
+  }
+
+  int64_t current = ctx->ra_pos;
+  int64_t new_pos = -1;
+  switch (whence & ~AVSEEK_FORCE) {
+    case SEEK_SET:
+      new_pos = offset;
+      break;
+    case SEEK_CUR:
+      new_pos = current + offset;
+      break;
+    case SEEK_END:
+      if (ctx->buffer.total_size < 0) {
+        return -1;
+      }
+      new_pos = ctx->buffer.total_size + offset;
+      break;
+    default:
+      return -1;
+  }
+
+  if (new_pos < 0) {
+    return -1;
+  }
+  if (ctx->buffer.total_size >= 0 && new_pos > ctx->buffer.total_size) {
+    return -1;
+  }
+
+  ctx->ra_pos = new_pos;
+  if (ctx->buffer.total_size >= 0 && ctx->ra_pos >= ctx->buffer.total_size) {
+    ctx->buffer.eof = 1;
+  } else {
+    ctx->buffer.eof = 0;
+  }
+  return new_pos;
+}
+
+static int read_packet(void *opaque, uint8_t *buf, int buf_size) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)opaque;
+  if (!ctx) {
+    return AVERROR(EINVAL);
+  }
+  if (ctx->io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    return read_packet_random_access(ctx, buf, buf_size);
+  }
+  return read_packet_append(&ctx->buffer, buf, buf_size);
+}
+
+static int64_t seek_stream(void *opaque, int64_t offset, int whence) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)opaque;
+  if (!ctx) {
+    return -1;
+  }
+  if (ctx->io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    return seek_stream_random_access(ctx, offset, whence);
+  }
+  return seek_stream_append(&ctx->buffer, offset, whence);
 }
 
 static void free_rgba_buffers(FFmpegWasmContext *ctx) {
@@ -269,6 +481,166 @@ static void free_audio_buffers(FFmpegWasmContext *ctx) {
   ctx->audio_linesize = 0;
   ctx->audio_nb_samples = 0;
   ctx->audio_pts_seconds = 0.0;
+}
+
+static int parse_truthy(const char *value) {
+  if (!value) {
+    return 0;
+  }
+  if (!av_strcasecmp(value, "1") ||
+      !av_strcasecmp(value, "true") ||
+      !av_strcasecmp(value, "yes") ||
+      !av_strcasecmp(value, "on")) {
+    return 1;
+  }
+  return 0;
+}
+
+static AVStream *find_attachment_stream(FFmpegWasmContext *ctx, int attachment_index) {
+  if (!ctx || !ctx->fmt || attachment_index < 0) {
+    return NULL;
+  }
+  int idx = 0;
+  for (unsigned int i = 0; i < ctx->fmt->nb_streams; i++) {
+    AVStream *stream = ctx->fmt->streams[i];
+    if (!stream || !stream->codecpar) {
+      continue;
+    }
+    if (stream->codecpar->codec_type != AVMEDIA_TYPE_ATTACHMENT) {
+      continue;
+    }
+    if (idx == attachment_index) {
+      return stream;
+    }
+    idx++;
+  }
+  return NULL;
+}
+
+static AVChapter *find_chapter(FFmpegWasmContext *ctx, int chapter_index) {
+  if (!ctx || !ctx->fmt || chapter_index < 0 || chapter_index >= (int)ctx->fmt->nb_chapters) {
+    return NULL;
+  }
+  return ctx->fmt->chapters[chapter_index];
+}
+
+static const char *attachment_name(AVStream *stream) {
+  if (!stream) {
+    return NULL;
+  }
+  AVDictionaryEntry *tag = av_dict_get(stream->metadata, "filename", NULL, 0);
+  if (tag && tag->value && tag->value[0]) {
+    return tag->value;
+  }
+  tag = av_dict_get(stream->metadata, "name", NULL, 0);
+  if (tag && tag->value && tag->value[0]) {
+    return tag->value;
+  }
+  return NULL;
+}
+
+static const char *attachment_mime_type(AVStream *stream) {
+  if (!stream) {
+    return NULL;
+  }
+  AVDictionaryEntry *tag = av_dict_get(stream->metadata, "mimetype", NULL, 0);
+  return tag ? tag->value : NULL;
+}
+
+static int attachment_is_font(AVStream *stream) {
+  if (!stream) {
+    return 0;
+  }
+  const char *mime = attachment_mime_type(stream);
+  if (mime) {
+    if (av_stristart(mime, "font/", NULL)) {
+      return 1;
+    }
+    if (!av_strcasecmp(mime, "application/x-truetype-font") ||
+        !av_strcasecmp(mime, "application/x-font-ttf") ||
+        !av_strcasecmp(mime, "application/x-font-opentype") ||
+        !av_strcasecmp(mime, "application/vnd.ms-opentype") ||
+        !av_strcasecmp(mime, "application/font-sfnt")) {
+      return 1;
+    }
+  }
+  const char *name = attachment_name(stream);
+  if (name && av_match_ext(name, "ttf,otf,ttc,woff,woff2")) {
+    return 1;
+  }
+  return 0;
+}
+
+static int load_attachment_fonts(FFmpegWasmContext *ctx) {
+  if (!ctx || !ctx->fmt || !ctx->ass_library) {
+    return 0;
+  }
+  if (ctx->attachment_fonts_loaded) {
+    return 0;
+  }
+
+  int added = 0;
+  for (unsigned int i = 0; i < ctx->fmt->nb_streams; i++) {
+    AVStream *stream = ctx->fmt->streams[i];
+    if (!stream || !stream->codecpar) {
+      continue;
+    }
+    if (stream->codecpar->codec_type != AVMEDIA_TYPE_ATTACHMENT) {
+      continue;
+    }
+    if (!attachment_is_font(stream)) {
+      continue;
+    }
+    if (!stream->codecpar->extradata || stream->codecpar->extradata_size <= 0) {
+      continue;
+    }
+
+    const char *name = attachment_name(stream);
+    if (!name || !name[0]) {
+      name = "attached-font";
+    }
+    ass_add_font(
+        ctx->ass_library,
+        (char *)name,
+        (char *)stream->codecpar->extradata,
+        stream->codecpar->extradata_size);
+    added++;
+  }
+
+  ctx->attachment_fonts_loaded = 1;
+  return added;
+}
+
+static int has_ordered_chapters_metadata(FFmpegWasmContext *ctx) {
+  if (!ctx || !ctx->fmt) {
+    return 0;
+  }
+
+  AVDictionaryEntry *tag = NULL;
+  while ((tag = av_dict_get(ctx->fmt->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
+    if (!tag->key || !tag->value) {
+      continue;
+    }
+    if (strstr(tag->key, "ordered") || strstr(tag->key, "ORDERED")) {
+      if (parse_truthy(tag->value)) {
+        return 1;
+      }
+    }
+  }
+
+  static const char *known_keys[] = {
+      "ordered_chapters",
+      "ORDERED_CHAPTERS",
+      "edition_flag_ordered",
+      "EDITION_FLAG_ORDERED",
+      NULL};
+  for (int i = 0; known_keys[i]; i++) {
+    tag = av_dict_get(ctx->fmt->metadata, known_keys[i], NULL, 0);
+    if (tag && parse_truthy(tag->value)) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static void close_subtitle_decoder(FFmpegWasmContext *ctx) {
@@ -322,6 +694,7 @@ static int init_ass_library(FFmpegWasmContext *ctx) {
 
   // Use embedded font only (no fontconfig); JS side injects "Inter"
   ass_set_fonts(ctx->ass_renderer, NULL, "Inter", 0, NULL, 1);
+  load_attachment_fonts(ctx);
   return 0;
 }
 
@@ -428,6 +801,10 @@ static void reset_decoder(FFmpegWasmContext *ctx) {
   ctx->audio_channels = 0;
   ctx->audio_sample_rate = 0;
   ctx->subtitles_enabled = 0;
+  ctx->attachment_fonts_loaded = 0;
+  ctx->ra_cache_size = 0;
+  ctx->ra_cache_start = -1;
+  ctx->ra_pos = 0;
 }
 
 static int setup_audio_resampler(FFmpegWasmContext *ctx) {
@@ -863,10 +1240,15 @@ EMSCRIPTEN_KEEPALIVE uintptr_t ffmpeg_wasm_create(int initial_capacity) {
   ctx->audio_time_base = (AVRational){0, 1};
   ctx->audio_enabled = 1;
   ctx->subtitles_enabled = 0;
+  ctx->attachment_fonts_loaded = 0;
   ctx->buffer.start = 0;
   ctx->buffer.limit = 0;
   ctx->buffer.keep_all = 1;  // Keep all data until open succeeds
   ctx->buffer.total_size = -1;
+  ctx->io_mode = FFMPEG_WASM_IO_APPEND_STREAM;
+  ctx->cache_limit = (size_t)FFMPEG_WASM_DEFAULT_CACHE_LIMIT;
+  ctx->ra_cache_start = -1;
+  ctx->ra_pos = 0;
   av_log_set_level(AV_LOG_ERROR);
   return (uintptr_t)ctx;
 }
@@ -878,6 +1260,9 @@ EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_destroy(uintptr_t handle) {
   }
 
   reset_decoder(ctx);
+  if (ctx->ra_cache_data) {
+    av_freep(&ctx->ra_cache_data);
+  }
   if (ctx->buffer.data) {
     av_freep(&ctx->buffer.data);
   }
@@ -889,6 +1274,9 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_append(uintptr_t handle, const uint8_t *dat
   if (!ctx) {
     av_log(NULL, AV_LOG_ERROR, "append: ctx is NULL\n");
     return AVERROR(EINVAL);
+  }
+  if (ctx->io_mode != FFMPEG_WASM_IO_APPEND_STREAM) {
+    return AVERROR(ENOSYS);
   }
   if (!data) {
     av_log(NULL, AV_LOG_ERROR, "append: data is NULL\n");
@@ -923,7 +1311,9 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_append(uintptr_t handle, const uint8_t *dat
 EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_set_eof(uintptr_t handle) {
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
   if (ctx) {
-    ctx->buffer.eof = 1;
+    if (ctx->io_mode == FFMPEG_WASM_IO_APPEND_STREAM) {
+      ctx->buffer.eof = 1;
+    }
     if (ctx->avio) {
       ctx->avio->eof_reached = 0;
       ctx->avio->error = 0;
@@ -933,14 +1323,14 @@ EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_set_eof(uintptr_t handle) {
 
 EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_set_keep_all(uintptr_t handle, int enabled) {
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
-  if (ctx) {
+  if (ctx && ctx->io_mode == FFMPEG_WASM_IO_APPEND_STREAM) {
     ctx->buffer.keep_all = enabled ? 1 : 0;
   }
 }
 
 EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_set_buffer_limit(uintptr_t handle, int limit_bytes) {
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
-  if (!ctx) {
+  if (!ctx || ctx->io_mode != FFMPEG_WASM_IO_APPEND_STREAM) {
     return;
   }
   if (limit_bytes <= 0) {
@@ -954,14 +1344,71 @@ EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_set_buffer_limit(uintptr_t handle, int lim
 EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_set_file_size(uintptr_t handle, double size) {
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
   if (ctx) {
-    ctx->buffer.total_size = (int64_t)size;
+    if (size < 0) {
+      ctx->buffer.total_size = -1;
+    } else {
+      ctx->buffer.total_size = (int64_t)size;
+    }
   }
 }
 
 EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_set_buffer_offset(uintptr_t handle, double offset) {
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
   if (ctx) {
-    ctx->buffer.offset = (int64_t)offset;
+    int64_t byte_offset = (int64_t)offset;
+    if (ctx->io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+      if (byte_offset < 0) {
+        byte_offset = 0;
+      }
+      ctx->ra_pos = byte_offset;
+      ctx->ra_cache_size = 0;
+      ctx->ra_cache_start = -1;
+      return;
+    }
+    ctx->buffer.offset = byte_offset;
+  }
+}
+
+EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_set_io_mode(uintptr_t handle, int io_mode) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  if (!ctx) {
+    return AVERROR(EINVAL);
+  }
+  if (ctx->opened) {
+    return AVERROR(EBUSY);
+  }
+  if (io_mode != FFMPEG_WASM_IO_APPEND_STREAM &&
+      io_mode != FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    return AVERROR(EINVAL);
+  }
+  ctx->io_mode = io_mode;
+  ctx->buffer.eof = 0;
+  ctx->buffer.read_pos = 0;
+  if (io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    ctx->ra_pos = 0;
+    ctx->ra_cache_size = 0;
+    ctx->ra_cache_start = -1;
+  }
+  return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_get_io_mode(uintptr_t handle) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  if (!ctx) {
+    return AVERROR(EINVAL);
+  }
+  return ctx->io_mode;
+}
+
+EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_set_cache_limit(uintptr_t handle, int limit_bytes) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  if (!ctx) {
+    return;
+  }
+  if (limit_bytes <= 0) {
+    ctx->cache_limit = (size_t)FFMPEG_WASM_DEFAULT_CACHE_LIMIT;
+  } else {
+    ctx->cache_limit = (size_t)limit_bytes;
   }
 }
 
@@ -997,6 +1444,15 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_open(uintptr_t handle, const char *format_n
   }
 
   ctx->buffer.read_pos = 0;
+  if (ctx->io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    if (ctx->buffer.total_size == 0) {
+      return AVERROR(EINVAL);
+    }
+    ctx->ra_pos = 0;
+    ctx->ra_cache_size = 0;
+    ctx->ra_cache_start = -1;
+    ctx->buffer.eof = 0;
+  }
 
   const int avio_buffer_size = 32 * 1024;
   uint8_t *avio_buffer = av_malloc(avio_buffer_size);
@@ -1008,7 +1464,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_open(uintptr_t handle, const char *format_n
       avio_buffer,
       avio_buffer_size,
       0,
-      &ctx->buffer,
+      ctx,
       read_packet,
       NULL,
       seek_stream);
@@ -1016,10 +1472,14 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_open(uintptr_t handle, const char *format_n
     av_free(avio_buffer);
     return AVERROR(ENOMEM);
   }
-  // Disable seeking during open to prevent FFmpeg from seeking to find
-  // container metadata that isn't buffered yet. We'll enable it later
-  // once the file is opened and we can handle seek failures gracefully.
-  ctx->avio->seekable = 0;
+  if (ctx->io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    ctx->avio->seekable = AVIO_SEEKABLE_NORMAL;
+  } else {
+    // Disable seeking during open to prevent FFmpeg from seeking to find
+    // container metadata that isn't buffered yet. We'll enable it later
+    // once the file is opened and we can handle seek failures gracefully.
+    ctx->avio->seekable = 0;
+  }
 
   ctx->fmt = avformat_alloc_context();
   if (!ctx->fmt) {
@@ -1120,7 +1580,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_open(uintptr_t handle, const char *format_n
 
   // Now that file is opened, enable seeking for playback
   // seek_stream will return -1 if position is outside buffered range
-  if (ctx->avio) {
+  if (ctx->avio && ctx->io_mode == FFMPEG_WASM_IO_APPEND_STREAM) {
     ctx->avio->seekable = AVIO_SEEKABLE_NORMAL;
   }
 
@@ -1162,6 +1622,19 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_seek_seconds(uintptr_t handle, double secon
     return AVERROR(EINVAL);
   }
 
+  double current_seconds = -1.0;
+  if (ctx->video_frame && ctx->video_time_base.den != 0) {
+    int64_t current_pts = ctx->video_frame->best_effort_timestamp;
+    if (current_pts != AV_NOPTS_VALUE) {
+      current_seconds = current_pts * av_q2d(ctx->video_time_base);
+    }
+  }
+
+  int64_t pos_before = -1;
+  if (ctx->avio) {
+    pos_before = avio_tell(ctx->avio);
+  }
+
   if (seconds < 0.0) {
     seconds = 0.0;
   }
@@ -1172,6 +1645,23 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_seek_seconds(uintptr_t handle, double secon
   if (ret < 0) {
     return ret;
   }
+
+  int64_t pos_after = -1;
+  if (ctx->avio) {
+    pos_after = avio_tell(ctx->avio);
+  }
+
+  // Detect false-positive backward seeks where demuxer returns success but
+  // does not move the underlying byte position.
+  if (current_seconds >= 0.0 &&
+      seconds + 1.0 < current_seconds &&
+      pos_before >= 0 &&
+      pos_after >= 0 &&
+      pos_after >= pos_before) {
+    return AVERROR(EIO);
+  }
+
+  avformat_flush(ctx->fmt);
 
   if (ctx->video_codec) {
     avcodec_flush_buffers(ctx->video_codec);
@@ -1188,6 +1678,67 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_seek_seconds(uintptr_t handle, double secon
   return 0;
 }
 
+EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_chapters_count(uintptr_t handle) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  if (!ctx || !ctx->fmt) {
+    return 0;
+  }
+  if (ctx->fmt->nb_chapters > INT_MAX) {
+    return INT_MAX;
+  }
+  return (int)ctx->fmt->nb_chapters;
+}
+
+EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_has_ordered_chapters(uintptr_t handle) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  return has_ordered_chapters_metadata(ctx);
+}
+
+EMSCRIPTEN_KEEPALIVE double ffmpeg_wasm_chapter_start_seconds(uintptr_t handle, int chapter_index) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  AVChapter *chapter = find_chapter(ctx, chapter_index);
+  if (!chapter || chapter->time_base.den == 0) {
+    return -1.0;
+  }
+  return chapter->start * av_q2d(chapter->time_base);
+}
+
+EMSCRIPTEN_KEEPALIVE double ffmpeg_wasm_chapter_end_seconds(uintptr_t handle, int chapter_index) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  AVChapter *chapter = find_chapter(ctx, chapter_index);
+  if (!chapter || chapter->time_base.den == 0 || chapter->end == AV_NOPTS_VALUE) {
+    return -1.0;
+  }
+  return chapter->end * av_q2d(chapter->time_base);
+}
+
+EMSCRIPTEN_KEEPALIVE const char *ffmpeg_wasm_chapter_title(uintptr_t handle, int chapter_index) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  AVChapter *chapter = find_chapter(ctx, chapter_index);
+  if (!chapter) {
+    return NULL;
+  }
+  AVDictionaryEntry *tag = av_dict_get(chapter->metadata, "title", NULL, 0);
+  return tag ? tag->value : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE double ffmpeg_wasm_chapter_id(uintptr_t handle, int chapter_index) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  AVChapter *chapter = find_chapter(ctx, chapter_index);
+  if (!chapter) {
+    return -1.0;
+  }
+  return (double)chapter->id;
+}
+
+EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_seek_chapter(uintptr_t handle, int chapter_index) {
+  double start_sec = ffmpeg_wasm_chapter_start_seconds(handle, chapter_index);
+  if (start_sec < 0.0) {
+    return AVERROR(EINVAL);
+  }
+  return ffmpeg_wasm_seek_seconds(handle, start_sec);
+}
+
 // Prepare for re-streaming from a new byte offset.
 // Keeps format context and codecs intact, just flushes buffers and resets stream position.
 // JS should call this, then stream new data from file.slice(new_offset).
@@ -1195,6 +1746,9 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_prepare_restream(uintptr_t handle, double n
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
   if (!ctx || !ctx->fmt || !ctx->opened) {
     return AVERROR(EINVAL);
+  }
+  if (ctx->io_mode != FFMPEG_WASM_IO_APPEND_STREAM) {
+    return AVERROR(ENOSYS);
   }
 
   int64_t byte_pos = (int64_t)new_byte_offset;
@@ -1518,6 +2072,20 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_buffered_bytes(uintptr_t handle) {
   if (!ctx) {
     return 0;
   }
+  if (ctx->io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    if (ctx->ra_cache_size == 0 || ctx->ra_pos < ctx->ra_cache_start) {
+      return 0;
+    }
+    int64_t cache_end = ctx->ra_cache_start + (int64_t)ctx->ra_cache_size;
+    if (ctx->ra_pos >= cache_end) {
+      return 0;
+    }
+    size_t buffered = (size_t)(cache_end - ctx->ra_pos);
+    if (buffered > INT_MAX) {
+      return INT_MAX;
+    }
+    return (int)buffered;
+  }
   if (ctx->buffer.size < ctx->buffer.read_pos) {
     return 0;
   }
@@ -1531,6 +2099,9 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_buffered_bytes(uintptr_t handle) {
 EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_compact_buffer(uintptr_t handle) {
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
   if (!ctx) {
+    return;
+  }
+  if (ctx->io_mode != FFMPEG_WASM_IO_APPEND_STREAM) {
     return;
   }
   compact_buffer(&ctx->buffer);
@@ -1615,6 +2186,58 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_stream_is_default(uintptr_t handle, int str
     return 0;
   }
   return (stream->disposition & AV_DISPOSITION_DEFAULT) ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_attachments_count(uintptr_t handle) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  if (!ctx || !ctx->fmt) {
+    return 0;
+  }
+
+  int count = 0;
+  for (unsigned int i = 0; i < ctx->fmt->nb_streams; i++) {
+    AVStream *stream = ctx->fmt->streams[i];
+    if (!stream || !stream->codecpar) {
+      continue;
+    }
+    if (stream->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT) {
+      if (count == INT_MAX) {
+        return INT_MAX;
+      }
+      count++;
+    }
+  }
+  return count;
+}
+
+EMSCRIPTEN_KEEPALIVE const char *ffmpeg_wasm_attachment_name(uintptr_t handle, int attachment_index) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  AVStream *stream = find_attachment_stream(ctx, attachment_index);
+  return attachment_name(stream);
+}
+
+EMSCRIPTEN_KEEPALIVE const char *ffmpeg_wasm_attachment_mime_type(uintptr_t handle, int attachment_index) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  AVStream *stream = find_attachment_stream(ctx, attachment_index);
+  return attachment_mime_type(stream);
+}
+
+EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_attachment_size(uintptr_t handle, int attachment_index) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  AVStream *stream = find_attachment_stream(ctx, attachment_index);
+  if (!stream || !stream->codecpar || stream->codecpar->extradata_size <= 0) {
+    return 0;
+  }
+  return stream->codecpar->extradata_size;
+}
+
+EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_attachment_data_ptr(uintptr_t handle, int attachment_index) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  AVStream *stream = find_attachment_stream(ctx, attachment_index);
+  if (!stream || !stream->codecpar || !stream->codecpar->extradata) {
+    return 0;
+  }
+  return (int)(uintptr_t)stream->codecpar->extradata;
 }
 
 EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_selected_video_stream(uintptr_t handle) {
@@ -1818,3 +2441,40 @@ EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_clear_subtitle_track(uintptr_t handle) {
     }
   }
 }
+
+#ifdef FFMPEG_WASM_TESTING
+EMSCRIPTEN_KEEPALIVE double ffmpeg_wasm_debug_seek_stream(uintptr_t handle, double offset, int whence) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  if (!ctx) {
+    return -1.0;
+  }
+  int64_t ret = seek_stream(ctx, (int64_t)offset, whence);
+  return (double)ret;
+}
+
+EMSCRIPTEN_KEEPALIVE double ffmpeg_wasm_debug_buffer_offset(uintptr_t handle) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  return ctx ? (double)ctx->buffer.offset : -1.0;
+}
+
+EMSCRIPTEN_KEEPALIVE double ffmpeg_wasm_debug_buffer_size(uintptr_t handle) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  return ctx ? (double)ctx->buffer.size : -1.0;
+}
+
+EMSCRIPTEN_KEEPALIVE double ffmpeg_wasm_debug_buffer_read_pos(uintptr_t handle) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  return ctx ? (double)ctx->buffer.read_pos : -1.0;
+}
+
+EMSCRIPTEN_KEEPALIVE double ffmpeg_wasm_debug_byte_pos(uintptr_t handle) {
+  FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
+  if (!ctx) {
+    return -1.0;
+  }
+  if (ctx->io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    return (double)ctx->ra_pos;
+  }
+  return (double)(ctx->buffer.offset + (int64_t)ctx->buffer.read_pos);
+}
+#endif

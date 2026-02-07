@@ -44,11 +44,37 @@ React demo:
 - `npm install`
 - `npm run dev`
 
+## Node Harness
+Use `scripts/ffmpeg-wasm-node.mjs` to mirror wasm exports outside the browser.
+
+Commands:
+- `node scripts/ffmpeg-wasm-node.mjs list-exports`
+- `node scripts/ffmpeg-wasm-node.mjs smoke /path/to/video.mkv 60`
+- `node scripts/test-seek-internals.mjs /path/to/video.mkv` (builds a test wasm and validates internal seek behavior)
+- `node scripts/test-core-features.mjs /path/to/video.mkv [wasm_js] [wasm_wasm]` (runs core decode/selection/seek checks)
+- `node scripts/test-mkv-regressions.mjs [--vectors-dir /tmp/ffmpeg-mkv-vectors] [--ordered-chapters /path/to/ordered.mkv]` (generates and validates no-cues/sparse-cues vectors; optionally validates ordered-chapters)
+
+As a module:
+```js
+import { loadWasmNode } from "./scripts/ffmpeg-wasm-node.mjs";
+
+const wasm = await loadWasmNode();
+const ctx = wasm.api.create(0);
+wasm.openLocalFile(ctx, "/path/to/video.mkv"); // uses ffmpegReadAt random-access path
+console.log("duration", wasm.api.duration(ctx));
+wasm.clearReadAtFile();
+wasm.api.destroy(ctx);
+```
+
 ## Recipe
 See `docs/RECIPE.md` for a step-by-step build narrative, decision rationale, and alternatives considered.
 
 ## Custom AVIO decode API
 This build exposes a small API to push bytes from JS into FFmpeg and decode frames.
+
+IO modes:
+- `append` (default): push incoming chunks with `ffmpeg_wasm_append`.
+- `read_at` (local files): set `ffmpeg_wasm_set_io_mode(..., 1)` and provide `Module.ffmpegReadAt(offset, len, dstPtr)` for native demuxer seeking.
 
 Flow:
 1. Create context with a buffer size.

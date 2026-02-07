@@ -9,6 +9,9 @@ const MAX_CHUNK_BYTES = 256 * 1024;
 const MIN_OPEN_BYTES = 2 * 1024 * 1024; // Default minimum bytes before attempting to open container
 const MIN_OPEN_BYTES_SMALL = 256 * 1024; // Lower threshold for small files
 const HEADER_SAMPLE_BYTES = 32; // Bytes to sample for EBML header sanity-check
+const FFMPEG_WASM_IO_APPEND_STREAM = 0;
+const FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL = 1;
+const LOCAL_READ_CACHE_LIMIT_BYTES = 128 * 1024 * 1024;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -24,6 +27,11 @@ const state = {
   streamToken: 0,
   sessionToken: 0,
   pendingStreamSelection: null,
+  desiredStreamSelection: {
+    videoStreamIndex: -1,
+    audioStreamIndex: -1,
+    subtitleStreamIndex: -2,
+  },
   frames: 0,
   bytes: 0,
   duration: 0,
@@ -58,6 +66,10 @@ const state = {
   lastStatsSent: 0,
   durationCheckLast: 0,
   durationUnknownLogged: false,
+  ioMode: FFMPEG_WASM_IO_APPEND_STREAM,
+  localReadSource: null,
+  fileReaderSync:
+    typeof FileReaderSync === "function" ? new FileReaderSync() : null,
   // New feature state
   playbackSpeed: 1.0,
   subtitleDelay: 0,
@@ -125,6 +137,39 @@ const createApi = (Module) => ({
     "number",
     "number",
   ]),
+  chaptersCount: cwrapMaybe(Module, "ffmpeg_wasm_chapters_count", "number", [
+    "number",
+  ]),
+  hasOrderedChapters: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_has_ordered_chapters",
+    "number",
+    ["number"],
+  ),
+  chapterStartSeconds: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_chapter_start_seconds",
+    "number",
+    ["number", "number"],
+  ),
+  chapterEndSeconds: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_chapter_end_seconds",
+    "number",
+    ["number", "number"],
+  ),
+  chapterTitle: cwrapMaybe(Module, "ffmpeg_wasm_chapter_title", "string", [
+    "number",
+    "number",
+  ]),
+  chapterId: cwrapMaybe(Module, "ffmpeg_wasm_chapter_id", "number", [
+    "number",
+    "number",
+  ]),
+  seekChapter: cwrapMaybe(Module, "ffmpeg_wasm_seek_chapter", "number", [
+    "number",
+    "number",
+  ]),
   setKeepAll: Module.cwrap("ffmpeg_wasm_set_keep_all", null, [
     "number",
     "number",
@@ -141,6 +186,17 @@ const createApi = (Module) => ({
     "number",
     "number",
   ]),
+  setIoMode: cwrapMaybe(Module, "ffmpeg_wasm_set_io_mode", "number", [
+    "number",
+    "number",
+  ]),
+  getIoMode: cwrapMaybe(Module, "ffmpeg_wasm_get_io_mode", "number", [
+    "number",
+  ]),
+  setCacheLimit: cwrapMaybe(Module, "ffmpeg_wasm_set_cache_limit", null, [
+    "number",
+    "number",
+  ]),
   setAudioEnabled: Module.cwrap("ffmpeg_wasm_set_audio_enabled", null, [
     "number",
     "number",
@@ -152,13 +208,13 @@ const createApi = (Module) => ({
     Module,
     "ffmpeg_wasm_stream_media_type",
     "number",
-    ["number", "number"]
+    ["number", "number"],
   ),
   streamCodecName: cwrapMaybe(
     Module,
     "ffmpeg_wasm_stream_codec_name",
     "string",
-    ["number", "number"]
+    ["number", "number"],
   ),
   streamLanguage: cwrapMaybe(Module, "ffmpeg_wasm_stream_language", "string", [
     "number",
@@ -172,19 +228,39 @@ const createApi = (Module) => ({
     Module,
     "ffmpeg_wasm_stream_is_default",
     "number",
-    ["number", "number"]
+    ["number", "number"],
   ),
+  attachmentsCount: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_attachments_count",
+    "number",
+    ["number"],
+  ),
+  attachmentName: cwrapMaybe(Module, "ffmpeg_wasm_attachment_name", "string", [
+    "number",
+    "number",
+  ]),
+  attachmentMimeType: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_attachment_mime_type",
+    "string",
+    ["number", "number"],
+  ),
+  attachmentSize: cwrapMaybe(Module, "ffmpeg_wasm_attachment_size", "number", [
+    "number",
+    "number",
+  ]),
   selectedVideoStream: cwrapMaybe(
     Module,
     "ffmpeg_wasm_selected_video_stream",
     "number",
-    ["number"]
+    ["number"],
   ),
   selectedAudioStream: cwrapMaybe(
     Module,
     "ffmpeg_wasm_selected_audio_stream",
     "number",
-    ["number"]
+    ["number"],
   ),
   audioIsEnabled: cwrapMaybe(Module, "ffmpeg_wasm_audio_is_enabled", "number", [
     "number",
@@ -198,49 +274,49 @@ const createApi = (Module) => ({
     Module,
     "ffmpeg_wasm_selected_subtitle_stream",
     "number",
-    ["number"]
+    ["number"],
   ),
   subtitleEventsCount: cwrapMaybe(
     Module,
     "ffmpeg_wasm_subtitle_events_count",
     "number",
-    ["number"]
+    ["number"],
   ),
   subtitleFirstStartMs: cwrapMaybe(
     Module,
     "ffmpeg_wasm_subtitle_first_start_ms",
     "number",
-    ["number"]
+    ["number"],
   ),
   subtitleFirstEndMs: cwrapMaybe(
     Module,
     "ffmpeg_wasm_subtitle_first_end_ms",
     "number",
-    ["number"]
+    ["number"],
   ),
   subtitlesEnabled: cwrapMaybe(
     Module,
     "ffmpeg_wasm_subtitles_enabled",
     "number",
-    ["number"]
+    ["number"],
   ),
   selectSubtitleStream: cwrapMaybe(
     Module,
     "ffmpeg_wasm_select_subtitle_stream",
     "number",
-    ["number", "number"]
+    ["number", "number"],
   ),
   renderSubtitles: cwrapMaybe(
     Module,
     "ffmpeg_wasm_render_subtitles",
     "number",
-    ["number", "number"]
+    ["number", "number"],
   ),
   clearSubtitleTrack: cwrapMaybe(
     Module,
     "ffmpeg_wasm_clear_subtitle_track",
     null,
-    ["number"]
+    ["number"],
   ),
   addFont: Module.cwrap("ffmpeg_wasm_add_font", "number", [
     "number",
@@ -315,6 +391,94 @@ const emitStreams = () => {
   }
 };
 
+const getChaptersPayload = () => {
+  if (!state.api || !state.ctx || !state.opened) {
+    return null;
+  }
+  if (!state.api.chaptersCount || !state.api.chapterStartSeconds) {
+    return null;
+  }
+
+  const count = state.api.chaptersCount(state.ctx);
+  if (!Number.isFinite(count) || count <= 0) {
+    return {
+      type: "chapters",
+      ordered: Boolean(
+        state.api.hasOrderedChapters &&
+        state.api.hasOrderedChapters(state.ctx) > 0,
+      ),
+      chapters: [],
+    };
+  }
+
+  const chapters = [];
+  for (let i = 0; i < count; i += 1) {
+    chapters.push({
+      index: i,
+      id: state.api.chapterId ? state.api.chapterId(state.ctx, i) : i,
+      startSeconds: state.api.chapterStartSeconds(state.ctx, i),
+      endSeconds: state.api.chapterEndSeconds
+        ? state.api.chapterEndSeconds(state.ctx, i)
+        : -1,
+      title: state.api.chapterTitle ? state.api.chapterTitle(state.ctx, i) : "",
+    });
+  }
+
+  return {
+    type: "chapters",
+    ordered: Boolean(
+      state.api.hasOrderedChapters &&
+      state.api.hasOrderedChapters(state.ctx) > 0,
+    ),
+    chapters,
+  };
+};
+
+const emitChapters = () => {
+  const payload = getChaptersPayload();
+  if (payload) {
+    postMessage(payload);
+  }
+};
+
+const getAttachmentsPayload = () => {
+  if (!state.api || !state.ctx || !state.opened) {
+    return null;
+  }
+  if (!state.api.attachmentsCount) {
+    return null;
+  }
+
+  const count = state.api.attachmentsCount(state.ctx);
+  if (!Number.isFinite(count) || count <= 0) {
+    return { type: "attachments", attachments: [] };
+  }
+
+  const attachments = [];
+  for (let i = 0; i < count; i += 1) {
+    attachments.push({
+      index: i,
+      name: state.api.attachmentName
+        ? state.api.attachmentName(state.ctx, i)
+        : "",
+      mimeType: state.api.attachmentMimeType
+        ? state.api.attachmentMimeType(state.ctx, i)
+        : "",
+      size: state.api.attachmentSize
+        ? state.api.attachmentSize(state.ctx, i)
+        : 0,
+    });
+  }
+  return { type: "attachments", attachments };
+};
+
+const emitAttachments = () => {
+  const payload = getAttachmentsPayload();
+  if (payload) {
+    postMessage(payload);
+  }
+};
+
 const emitStats = (force = false) => {
   const now = performance.now();
   if (!force && now - state.lastStatsSent < 120) {
@@ -333,11 +497,41 @@ const emitStats = (force = false) => {
   });
 };
 
+const hasRandomAccessIo = () =>
+  Boolean(
+    state.fileReaderSync &&
+    state.api &&
+    state.api.setIoMode &&
+    hasExport("ffmpeg_wasm_set_io_mode"),
+  );
+
+const setLocalReadSource = (file) => {
+  state.localReadSource = file || null;
+};
+
+const configureIoMode = (mode) => {
+  if (!state.ctx || !state.api || !state.api.setIoMode) {
+    return false;
+  }
+  if (!hasExport("ffmpeg_wasm_set_io_mode")) {
+    return false;
+  }
+  const ret = state.api.setIoMode(state.ctx, mode);
+  if (ret < 0) {
+    postLog(`Failed to set IO mode ${mode} (${ret}).`);
+    return false;
+  }
+  state.ioMode = mode;
+  return true;
+};
+
 const destroyDecoder = () => {
   if (state.ctx && state.api) {
     state.api.destroy(state.ctx);
   }
   state.ctx = 0;
+  state.ioMode = FFMPEG_WASM_IO_APPEND_STREAM;
+  setLocalReadSource(null);
   state.opened = false;
   state.waitingForData = false;
   state.draining = false;
@@ -351,6 +545,7 @@ const destroyDecoder = () => {
   state.seekTarget = null;
   state.seekUiLast = 0;
   state.seekPreviewLast = 0;
+  state.pendingStreamSelection = null;
   state.lastOpenError = null;
   state.lastOpenErrorLogged = null;
   state.headerSample = null;
@@ -500,11 +695,14 @@ const getMinOpenBytes = () => {
 };
 
 const describeOpenFailure = (ret, minOpenBytes) => {
+  if (state.ioMode === FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    return `Open failed (${ret}) in local random-access mode.`;
+  }
   const headerOk = ebmlHeaderLooksValid();
   const hints = [];
   if (headerOk === false) {
     hints.push(
-      "Missing or invalid EBML header; ensure the stream starts at byte 0."
+      "Missing or invalid EBML header; ensure the stream starts at byte 0.",
     );
   }
   if (state.activeFile && state.bytes < minOpenBytes && !state.draining) {
@@ -516,9 +714,12 @@ const describeOpenFailure = (ret, minOpenBytes) => {
 
 const tryOpen = () => {
   if (state.opened || !state.ctx) return;
-  // Wait for minimum data before attempting to parse container header
-  const minOpenBytes = getMinOpenBytes();
-  if (state.bytes < minOpenBytes && !state.draining) return;
+  let minOpenBytes = 0;
+  if (state.ioMode === FFMPEG_WASM_IO_APPEND_STREAM) {
+    // Wait for minimum data before attempting to parse container header
+    minOpenBytes = getMinOpenBytes();
+    if (state.bytes < minOpenBytes && !state.draining) return;
+  }
 
   const ret = state.api.open(state.ctx, state.formatHint || null);
   if (ret === 0) {
@@ -538,7 +739,7 @@ const tryOpen = () => {
       ) {
         state.durationUnknownLogged = true;
         postLog(
-          "MP4 duration unknown until moov atom is available (faststart recommended)."
+          "MP4 duration unknown until moov atom is available (faststart recommended).",
         );
       }
     }
@@ -550,7 +751,7 @@ const tryOpen = () => {
       const selectRet = state.api.selectStreams(
         state.ctx,
         Number(videoStreamIndex),
-        Number(audioStreamIndex)
+        Number(audioStreamIndex),
       );
       if (selectRet < 0) {
         postLog(`Track selection failed (${selectRet}).`);
@@ -567,7 +768,7 @@ const tryOpen = () => {
       ) {
         const subRet = state.api.selectSubtitleStream(
           state.ctx,
-          subtitleStreamIndex
+          subtitleStreamIndex,
         );
         if (subRet < 0) {
           postLog(`Subtitle track selection failed (${subRet}).`);
@@ -575,13 +776,15 @@ const tryOpen = () => {
           postLog(
             `Subtitle track set to ${
               subtitleStreamIndex === -1 ? "auto" : subtitleStreamIndex
-            }`
+            }`,
           );
           injectFont();
         }
       }
     }
     emitStreams();
+    emitChapters();
+    emitAttachments();
     emitStats(true);
     startDecodeLoop(0);
   } else if (ret !== state.lastOpenError) {
@@ -628,6 +831,9 @@ const appendChunk = (token, chunk) => {
 };
 
 const waitForBuffer = async (token) => {
+  if (state.ioMode !== FFMPEG_WASM_IO_APPEND_STREAM) {
+    return;
+  }
   if (!state.api || !state.ctx || !state.api.bufferedBytes) {
     return;
   }
@@ -816,7 +1022,7 @@ const ensureWebGL = () => {
      void main() {
        gl_Position = vec4(a_position, 0.0, 1.0);
        v_texCoord = a_texCoord;
-     }`
+     }`,
   );
   const frag = compileShader(
     gl.FRAGMENT_SHADER,
@@ -825,7 +1031,7 @@ const ensureWebGL = () => {
      uniform sampler2D u_texture;
      void main() {
        gl_FragColor = texture2D(u_texture, v_texCoord);
-     }`
+     }`,
   );
 
   if (!vert || !frag) {
@@ -848,7 +1054,7 @@ const ensureWebGL = () => {
   gl.bufferData(
     gl.ARRAY_BUFFER,
     new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
-    gl.STATIC_DRAW
+    gl.STATIC_DRAW,
   );
   const positionLoc = gl.getAttribLocation(program, "a_position");
   gl.enableVertexAttribArray(positionLoc);
@@ -859,7 +1065,7 @@ const ensureWebGL = () => {
   gl.bufferData(
     gl.ARRAY_BUFFER,
     new Float32Array([0, 1, 1, 1, 0, 0, 1, 0]),
-    gl.STATIC_DRAW
+    gl.STATIC_DRAW,
   );
   const texCoordLoc = gl.getAttribLocation(program, "a_texCoord");
   gl.enableVertexAttribArray(texCoordLoc);
@@ -933,7 +1139,7 @@ const renderFrameWebGL = (ptr, stride, width, height) => {
     0,
     gl.RGBA,
     gl.UNSIGNED_BYTE,
-    state.rgbaBuffer
+    state.rgbaBuffer,
   );
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 };
@@ -968,8 +1174,8 @@ const renderFrame = () => {
     ) {
       postLog(
         `Subtitle render: ret=${drew} enabled=${enabled} track=${selectedSub} delay=${state.subtitleDelay.toFixed(
-          3
-        )} pts=${pts.toFixed(3)} events=${state.api.subtitleEventsCount ? state.api.subtitleEventsCount(state.ctx) : "n/a"} firstStartMs=${state.api.subtitleFirstStartMs ? state.api.subtitleFirstStartMs(state.ctx) : "n/a"} firstEndMs=${state.api.subtitleFirstEndMs ? state.api.subtitleFirstEndMs(state.ctx) : "n/a"}`
+          3,
+        )} pts=${pts.toFixed(3)} events=${state.api.subtitleEventsCount ? state.api.subtitleEventsCount(state.ctx) : "n/a"} firstStartMs=${state.api.subtitleFirstStartMs ? state.api.subtitleFirstStartMs(state.ctx) : "n/a"} firstEndMs=${state.api.subtitleFirstEndMs ? state.api.subtitleFirstEndMs(state.ctx) : "n/a"}`,
       );
       state._subtitleDebugCount += 1;
       state._subtitleLastLogPts = pts;
@@ -1009,7 +1215,7 @@ const handleAudioFrame = () => {
   state.audioSampleRate = sampleRate;
   postMessage(
     { type: "audio", channels, sampleRate, pts, buffer: copy.buffer },
-    [copy.buffer]
+    [copy.buffer],
   );
 };
 
@@ -1180,6 +1386,11 @@ const startDecodeLoop = (delayMs) => {
 };
 
 const performSlowSeek = (target) => {
+  if (state.ioMode === FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    postLog("Slow seek fallback is disabled in local random-access mode.");
+    startDecodeLoop(0);
+    return;
+  }
   // For forward seeks: just fast-forward through frames (don't restart)
   // For backward seeks: must restart from beginning (MKV can't seek backward in stream)
   const needsRestart = target < state.currentTime;
@@ -1192,9 +1403,9 @@ const performSlowSeek = (target) => {
   postLog(
     needsRestart
       ? `Slow seek backward to ${target.toFixed(
-          2
+          2,
         )}s (restarting from beginning).`
-      : `Slow seek forward to ${target.toFixed(2)}s (fast-forwarding).`
+      : `Slow seek forward to ${target.toFixed(2)}s (fast-forwarding).`,
   );
 
   postMessage({ type: "audioClear" });
@@ -1252,6 +1463,10 @@ const performSlowSeek = (target) => {
         state.api.setAudioEnabled(state.ctx, 0);
       }
 
+      if (state.api.selectStreams && state.desiredStreamSelection) {
+        state.pendingStreamSelection = { ...state.desiredStreamSelection };
+      }
+
       streamFile(file);
       state.playing = true;
       startDecodeLoop(0);
@@ -1287,29 +1502,48 @@ const performSeek = (seconds) => {
   const ret = state.api.seek(state.ctx, target);
 
   if (ret < 0) {
+    if (state.ioMode === FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+      postLog(`Seek failed with code ${ret} in local random-access mode.`);
+      startDecodeLoop(0);
+      return;
+    }
     postLog(`Seek failed with code ${ret}; falling back to slow seek.`);
     state.seekSlow = true;
     performSlowSeek(target);
     return;
   }
 
-  // For backward seeks, verify FFmpeg actually moved backward
-  // If data was compacted, FFmpeg might stay at current position
+  // For backward seeks, verify FFmpeg actually moved backward.
+  // A single probe is not enough because the first decoded packet may be audio.
   if (isBackward) {
-    // Peek at next frame to check actual position
-    const peekRet = state.api.readFrame(state.ctx);
-    if (peekRet === 1) {
-      const actualPts = state.api.pts(state.ctx);
-      // If we're still far ahead of target, fall back to slow seek
-      if (actualPts > target + 10) {
-        postLog(
-          `Backward seek landed at ${actualPts.toFixed(
-            1
-          )}s instead of ${target.toFixed(1)}s; restarting.`
-        );
-        performSlowSeek(target);
-        return;
+    let actualPts = null;
+    const maxProbePackets = 160;
+    for (let i = 0; i < maxProbePackets; i += 1) {
+      const probeRet = state.api.readFrame(state.ctx);
+      if (probeRet === 1) {
+        actualPts = state.api.pts(state.ctx);
+        break;
       }
+      if (probeRet === 2) continue;
+      if (probeRet === 0 || probeRet < 0) break;
+    }
+
+    if (actualPts === null) {
+      postLog("Backward seek verification failed; restarting from beginning.");
+      state.seekSlow = true;
+      performSlowSeek(target);
+      return;
+    }
+
+    if (actualPts > target + 10) {
+      postLog(
+        `Backward seek landed at ${actualPts.toFixed(
+          1,
+        )}s instead of ${target.toFixed(1)}s; restarting.`,
+      );
+      state.seekSlow = true;
+      performSlowSeek(target);
+      return;
     }
   }
 
@@ -1329,6 +1563,65 @@ const performSeek = (seconds) => {
 
   emitStats(true);
   startDecodeLoop(0);
+};
+
+const performSeekChapter = (chapterIndex, fallbackSeconds) => {
+  if (!state.ctx || !state.opened) {
+    postLog("Chapter seek unavailable before media is opened.");
+    return;
+  }
+
+  const index = Number(chapterIndex);
+  if (!Number.isInteger(index) || index < 0) {
+    postLog(`Invalid chapter index: ${chapterIndex}`);
+    return;
+  }
+
+  let target = Number(fallbackSeconds);
+  if (
+    state.api.chapterStartSeconds &&
+    state.api.chaptersCount &&
+    index < state.api.chaptersCount(state.ctx)
+  ) {
+    const chapterStart = state.api.chapterStartSeconds(state.ctx, index);
+    if (Number.isFinite(chapterStart) && chapterStart >= 0) {
+      target = chapterStart;
+    }
+  }
+
+  if (state.api.seekChapter && hasExport("ffmpeg_wasm_seek_chapter")) {
+    stopDecodeLoop();
+    postMessage({ type: "audioClear" });
+
+    const ret = state.api.seekChapter(state.ctx, index);
+    if (ret >= 0) {
+      state.seeking = true;
+      state.seekTarget = Number.isFinite(target) ? Math.max(0, target) : null;
+      state.basePts = null;
+      state.baseWall = 0;
+      state.currentTime = 0;
+      state.frames = 0;
+      postStatus("Seeking chapter...");
+      if (
+        state.api.setAudioEnabled &&
+        hasExport("ffmpeg_wasm_set_audio_enabled")
+      ) {
+        state.api.setAudioEnabled(state.ctx, 0);
+      }
+      emitStats(true);
+      startDecodeLoop(0);
+      return;
+    }
+
+    postLog(`seekChapter failed (${ret}); trying timestamp fallback.`);
+  }
+
+  if (Number.isFinite(target)) {
+    performSeek(target);
+    return;
+  }
+
+  postLog("Chapter seek fallback unavailable (missing timestamp).");
 };
 
 const setRenderMode = (mode) => {
@@ -1413,11 +1706,12 @@ const startSource = async ({
     const s = Number.isFinite(subtitleStreamIndex)
       ? Number(subtitleStreamIndex)
       : -2;
-    state.pendingStreamSelection = {
+    state.desiredStreamSelection = {
       videoStreamIndex: v,
       audioStreamIndex: a,
       subtitleStreamIndex: s,
     };
+    state.pendingStreamSelection = { ...state.desiredStreamSelection };
   }
 
   state.seekEnabled = Boolean(file);
@@ -1441,14 +1735,39 @@ const startSource = async ({
   ensureDecoder(bufferBytes);
   if (!state.ctx) return;
 
-  // keep_all is now managed by C code:
-  // - Set to 1 at create (prevents buffer compaction during open)
-  // - Set to 0 after successful open (allows normal compaction during playback)
-  if (state.api.setBufferLimit && hasExport("ffmpeg_wasm_set_buffer_limit")) {
-    state.api.setBufferLimit(state.ctx, BUFFER_LIMIT_BYTES);
+  let useLocalRandomAccess = false;
+  if (file && hasRandomAccessIo()) {
+    useLocalRandomAccess = configureIoMode(FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL);
+    if (useLocalRandomAccess) {
+      setLocalReadSource(file);
+      if (state.api.setCacheLimit && hasExport("ffmpeg_wasm_set_cache_limit")) {
+        state.api.setCacheLimit(state.ctx, LOCAL_READ_CACHE_LIMIT_BYTES);
+      }
+      if (state.api.setFileSize && hasExport("ffmpeg_wasm_set_file_size")) {
+        state.api.setFileSize(state.ctx, file.size);
+      }
+      state.bytes = file.size;
+      postLog(`Using local random-access IO for ${file.name}.`);
+    }
   }
-  if (file && state.api.setFileSize && hasExport("ffmpeg_wasm_set_file_size")) {
-    state.api.setFileSize(state.ctx, file.size);
+
+  if (!useLocalRandomAccess) {
+    configureIoMode(FFMPEG_WASM_IO_APPEND_STREAM);
+    setLocalReadSource(null);
+    state.bytes = 0;
+    // keep_all is managed in C:
+    // - 1 before open to preserve probing bytes
+    // - 0 after open to allow compaction
+    if (state.api.setBufferLimit && hasExport("ffmpeg_wasm_set_buffer_limit")) {
+      state.api.setBufferLimit(state.ctx, BUFFER_LIMIT_BYTES);
+    }
+    if (
+      file &&
+      state.api.setFileSize &&
+      hasExport("ffmpeg_wasm_set_file_size")
+    ) {
+      state.api.setFileSize(state.ctx, file.size);
+    }
   }
 
   state.playing = true;
@@ -1457,8 +1776,20 @@ const startSource = async ({
   emitStats(true);
 
   if (file) {
-    streamFile(file);
+    if (useLocalRandomAccess) {
+      tryOpen();
+      if (!state.opened) {
+        state.playing = false;
+        postStatus("Open failed");
+        emitStats(true);
+        return;
+      }
+    } else {
+      streamFile(file);
+    }
   } else if (url) {
+    configureIoMode(FFMPEG_WASM_IO_APPEND_STREAM);
+    setLocalReadSource(null);
     streamUrl(url);
   } else {
     postLog("Choose a file or enter a URL.");
@@ -1495,7 +1826,7 @@ const initModule = async () => {
     .then((buf) => {
       state.fontData = new Uint8Array(buf);
       postLog(
-        `Loaded font: Inter-Regular.ttf (${state.fontData.byteLength} bytes)`
+        `Loaded font: Inter-Regular.ttf (${state.fontData.byteLength} bytes)`,
       );
     })
     .catch((e) => {
@@ -1514,6 +1845,36 @@ const initModule = async () => {
   }
 
   state.api = createApi(state.Module);
+  state.Module.ffmpegReadAt = (offset, len, dstPtr) => {
+    const file = state.localReadSource;
+    if (!file || !state.fileReaderSync) {
+      return -38; // ENOSYS
+    }
+
+    const start = Math.max(0, Math.trunc(Number(offset) || 0));
+    const want = Math.max(0, Math.trunc(Number(len) || 0));
+    if (want <= 0) {
+      return 0;
+    }
+    if (start >= file.size) {
+      return 0;
+    }
+
+    const end = Math.min(file.size, start + want);
+    if (end <= start) {
+      return 0;
+    }
+
+    try {
+      const view = new Uint8Array(
+        state.fileReaderSync.readAsArrayBuffer(file.slice(start, end)),
+      );
+      state.Module.HEAPU8.set(view, dstPtr >>> 0);
+      return view.byteLength;
+    } catch (err) {
+      return -5; // EIO
+    }
+  };
   postStatus("Ready");
   postMessage({ type: "ready" });
   postLog("Module ready.");
@@ -1527,7 +1888,7 @@ onmessage = (event) => {
 
   if (msg.type === "subtitleDebug") {
     postLog(
-      `Subtitle debug: ${msg.note || ""} nEvents=${msg.nEvents} firstStartMs=${msg.firstStartMs} firstEndMs=${msg.firstEndMs}`
+      `Subtitle debug: ${msg.note || ""} nEvents=${msg.nEvents} firstStartMs=${msg.firstStartMs} firstEndMs=${msg.firstEndMs}`,
     );
     return;
   }
@@ -1561,6 +1922,8 @@ onmessage = (event) => {
     resetPlayback();
   } else if (msg.type === "seek") {
     performSeek(Number(msg.seconds) || 0);
+  } else if (msg.type === "seekChapter") {
+    performSeekChapter(msg.chapterIndex, msg.fallbackSeconds);
   } else if (msg.type === "renderMode") {
     setRenderMode(msg.mode);
   } else if (msg.type === "selectStreams") {
@@ -1571,22 +1934,28 @@ onmessage = (event) => {
       return;
     }
     if (!state.ctx || !state.opened) {
-      state.pendingStreamSelection = {
-        ...(state.pendingStreamSelection || {}),
+      state.desiredStreamSelection = {
+        ...(state.desiredStreamSelection || {}),
         videoStreamIndex,
         audioStreamIndex,
       };
+      state.pendingStreamSelection = { ...state.desiredStreamSelection };
       return;
     }
     const ret = state.api.selectStreams(
       state.ctx,
       videoStreamIndex,
-      audioStreamIndex
+      audioStreamIndex,
     );
     if (ret < 0) {
       postLog(`Track selection failed (${ret}).`);
       return;
     }
+    state.desiredStreamSelection = {
+      ...(state.desiredStreamSelection || {}),
+      videoStreamIndex,
+      audioStreamIndex,
+    };
     postMessage({ type: "audioClear" });
     state.basePts = null;
     state.baseWall = 0;
@@ -1614,12 +1983,13 @@ onmessage = (event) => {
       return;
     }
     if (!state.ctx || !state.opened) {
-      state.pendingStreamSelection = {
-        ...(state.pendingStreamSelection || {}),
+      state.desiredStreamSelection = {
+        ...(state.desiredStreamSelection || {}),
         subtitleStreamIndex,
       };
+      state.pendingStreamSelection = { ...state.desiredStreamSelection };
       postLog(
-        `Subtitle track ${subtitleStreamIndex} queued for when file opens.`
+        `Subtitle track ${subtitleStreamIndex} queued for when file opens.`,
       );
       return;
     }
@@ -1636,15 +2006,12 @@ onmessage = (event) => {
       ? state.api.selectedSubtitleStream(state.ctx)
       : null;
     postLog(
-      `Subtitle select ok ret=${ret} enabled=${enabledNow} track=${selectedNow}`
+      `Subtitle select ok ret=${ret} enabled=${enabledNow} track=${selectedNow}`,
     );
-    // Update pending selection state so it persists if re-opened (e.g. seek restart)
-    if (state.pendingStreamSelection) {
-      state.pendingStreamSelection.subtitleStreamIndex = subtitleStreamIndex;
-    }
-    if (state.api.clearSubtitleTrack && subtitleStreamIndex >= 0) {
-      state.api.clearSubtitleTrack(state.ctx);
-    }
+    state.desiredStreamSelection = {
+      ...(state.desiredStreamSelection || {}),
+      subtitleStreamIndex,
+    };
     state._subtitleDebugCount = 0;
     state._subtitleDrawnOnce = false;
     state._subtitleRenderMissingLogged = false;
@@ -1654,13 +2021,13 @@ onmessage = (event) => {
         subtitleStreamIndex === -2
           ? "disabled"
           : `set to ${subtitleStreamIndex}`
-      }`
+      }`,
     );
   } else if (msg.type === "setSubtitleDelay") {
     // Set subtitle delay
     state.subtitleDelay = Number(msg.delay) || 0;
     postLog(
-      `Subtitle delay set to ${(state.subtitleDelay * 1000).toFixed(0)}ms`
+      `Subtitle delay set to ${(state.subtitleDelay * 1000).toFixed(0)}ms`,
     );
   }
 };
@@ -1683,7 +2050,7 @@ const takeScreenshot = () => {
         canvas.height,
         gl.RGBA,
         gl.UNSIGNED_BYTE,
-        pixels
+        pixels,
       );
 
       // WebGL reads from bottom-left, need to flip vertically

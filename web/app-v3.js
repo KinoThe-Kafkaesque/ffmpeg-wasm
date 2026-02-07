@@ -34,6 +34,10 @@ const osdEl = document.getElementById("osd");
 const videoTrackMenu = document.getElementById("videoTrackMenu");
 const audioTrackMenu = document.getElementById("audioTrackMenu");
 const subtitleTrackMenu = document.getElementById("subtitleTrackMenu");
+const chapterMenu = document.getElementById("chapterMenu");
+const attachmentInfoEl = document.getElementById("attachmentInfo");
+const attachmentCountEl = document.getElementById("attachmentCount");
+const attachmentListEl = document.getElementById("attachmentList");
 const speedDisplay = document.getElementById("speedDisplay");
 const screenshotBtn = document.getElementById("screenshotBtn");
 const audioDelayInput = document.getElementById("audioDelayInput");
@@ -113,6 +117,9 @@ const state = {
     contrast: 100,
     saturation: 100,
   },
+  chapters: [],
+  hasOrderedChapters: false,
+  attachments: [],
 };
 
 const loadTrackPrefs = () => {
@@ -245,6 +252,131 @@ const populateSubtitleTracks = (streams) => {
       )
     );
   }
+};
+
+const chapterDisplayTitle = (chapter) => {
+  if (!chapter) return "Untitled chapter";
+  const title = typeof chapter.title === "string" ? chapter.title.trim() : "";
+  if (title) return title;
+  return `Chapter ${Number(chapter.index) + 1}`;
+};
+
+const jumpToChapter = (chapter) => {
+  if (!chapter || !state.worker) return;
+  if (!state.seekEnabled) {
+    showOsd("Seek unavailable for this source");
+    return;
+  }
+  const chapterIndex = Number(chapter.index);
+  if (!Number.isInteger(chapterIndex) || chapterIndex < 0) {
+    return;
+  }
+  const target = Number(chapter.start);
+  const fallbackSeconds = Number.isFinite(target) && target >= 0 ? target : null;
+  clearAudioQueue();
+  if (fallbackSeconds !== null) {
+    state.pts = fallbackSeconds;
+    updateTimeline(fallbackSeconds);
+    updateStats();
+  }
+  state.worker.postMessage({
+    type: "seekChapter",
+    chapterIndex,
+    fallbackSeconds,
+  });
+  showOsd(`Chapter: ${chapterDisplayTitle(chapter)}`);
+};
+
+const renderChapterMenu = () => {
+  if (!chapterMenu) return;
+  chapterMenu.innerHTML = "";
+
+  if (state.hasOrderedChapters) {
+    const ordered = document.createElement("div");
+    ordered.className = "menu-item menu-item-static";
+    ordered.textContent = "Ordered chapters detected";
+    chapterMenu.appendChild(ordered);
+    chapterMenu.appendChild(document.createElement("div")).className =
+      "menu-separator";
+  }
+
+  if (!Array.isArray(state.chapters) || state.chapters.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "menu-item menu-item-static";
+    empty.textContent = "No chapters detected";
+    chapterMenu.appendChild(empty);
+    return;
+  }
+
+  for (const chapter of state.chapters) {
+    const start = Number(chapter.start);
+    const startText = Number.isFinite(start) ? formatTime(start) : "--:--";
+    const label = `${startText} · ${chapterDisplayTitle(chapter)}`;
+    chapterMenu.appendChild(createMenuItem(label, () => jumpToChapter(chapter), false));
+  }
+};
+
+const renderAttachmentInspector = () => {
+  if (!attachmentInfoEl || !attachmentListEl || !attachmentCountEl) return;
+  const attachments = Array.isArray(state.attachments) ? state.attachments : [];
+  attachmentCountEl.textContent = String(attachments.length);
+  attachmentListEl.innerHTML = "";
+  if (attachments.length === 0) {
+    attachmentInfoEl.textContent = "No attachments detected.";
+    return;
+  }
+
+  const fontLike = attachments.filter((item) => {
+    const mime = String(item?.mimeType || "").toLowerCase();
+    const name = String(item?.name || "").toLowerCase();
+    return mime.includes("font") || /\.(ttf|otf|woff2?)$/.test(name);
+  }).length;
+  attachmentInfoEl.textContent = `${attachments.length} attachments (${fontLike} font-like)`;
+
+  for (const item of attachments) {
+    const row = document.createElement("div");
+    row.className = "attachment-item";
+
+    const name = document.createElement("span");
+    name.className = "attachment-name";
+    name.textContent = item?.name || `attachment-${item?.index ?? "?"}`;
+
+    const meta = document.createElement("span");
+    meta.className = "attachment-meta";
+    const mime = item?.mimeType || "application/octet-stream";
+    const size = Number.isFinite(item?.size) ? formatBytes(item.size) : "unknown size";
+    meta.textContent = `${mime} · ${size}`;
+
+    row.appendChild(name);
+    row.appendChild(meta);
+    attachmentListEl.appendChild(row);
+  }
+};
+
+const setChapterData = (payload) => {
+  const chapters = Array.isArray(payload?.chapters) ? payload.chapters : [];
+  state.chapters = chapters.map((chapter, index) => ({
+    index: Number.isInteger(chapter?.index) ? chapter.index : index,
+    id: Number.isFinite(chapter?.id) ? chapter.id : index,
+    title: chapter?.title || "",
+    start: Number(chapter?.start),
+    end: Number(chapter?.end),
+  }));
+  state.hasOrderedChapters = Boolean(payload?.hasOrderedChapters);
+  renderChapterMenu();
+};
+
+const setAttachmentData = (payload) => {
+  const attachments = Array.isArray(payload?.attachments)
+    ? payload.attachments
+    : [];
+  state.attachments = attachments.map((item, index) => ({
+    index: Number.isInteger(item?.index) ? item.index : index,
+    name: item?.name || "",
+    mimeType: item?.mimeType || "",
+    size: Number(item?.size) || 0,
+  }));
+  renderAttachmentInspector();
 };
 
 const setVideoTrack = (index) => {
@@ -649,12 +781,17 @@ const resetUi = () => {
   state.frames = 0;
   state.bytes = 0;
   state.pts = 0;
+  state.chapters = [];
+  state.hasOrderedChapters = false;
+  state.attachments = [];
   setDuration(0);
   updateTimeline(0);
   if (resolutionEl) resolutionEl.textContent = "-";
   setSeekEnabled(false);
   clearAudioQueue();
   updateStats();
+  renderChapterMenu();
+  renderAttachmentInspector();
 };
 
 let activityTimeout;
@@ -736,6 +873,8 @@ const startPlayback = () => {
       if (!file && !url) fileInput.click();
       return;
     }
+    setChapterData({ chapters: [], hasOrderedChapters: false });
+    setAttachmentData({ attachments: [] });
     const bufferMb = Number.parseInt(bufferSizeInput.value, 10) || 4;
     const bufferBytes = Math.max(1, bufferMb) * 1024 * 1024;
 
@@ -842,6 +981,16 @@ const initWorker = () => {
       state.lastStreams = msg.streams; // Store for menu repopulation
       populateTrackSelects(msg);
       populateSubtitleTracks(msg.streams || []);
+      return;
+    }
+
+    if (msg.type === "chapters") {
+      setChapterData(msg);
+      return;
+    }
+
+    if (msg.type === "attachments") {
+      setAttachmentData(msg);
       return;
     }
 

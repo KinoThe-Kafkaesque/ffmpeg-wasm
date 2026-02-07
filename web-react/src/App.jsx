@@ -48,6 +48,10 @@ function App() {
   const [seekHint, setSeekHint] = useState("");
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [chapters, setChapters] = useState([]);
+  const [hasOrderedChapters, setHasOrderedChapters] = useState(false);
+  const [selectedChapter, setSelectedChapter] = useState("");
+  const [attachments, setAttachments] = useState([]);
 
   const canvas2dRef = useRef(null);
   const canvasGlRef = useRef(null);
@@ -327,6 +331,10 @@ function App() {
     setSeekValue(0);
     setSeekEnabled(false);
     setSeekHint("");
+    setChapters([]);
+    setHasOrderedChapters(false);
+    setSelectedChapter("");
+    setAttachments([]);
     updateStats();
   };
 
@@ -365,6 +373,10 @@ function App() {
       startedRef.current = true;
       setPlaying(true);
       setStatus("Starting...");
+      setChapters([]);
+      setHasOrderedChapters(false);
+      setSelectedChapter("");
+      setAttachments([]);
       if (!audioRef.current.initPromise && !audioRef.current.failed) {
         initAudio(DEFAULT_AUDIO_RATE, 2);
       }
@@ -419,6 +431,43 @@ function App() {
     setSeekValue(target);
     setStatus("Seeking...");
     worker.postMessage({ type: "seek", seconds: target });
+  };
+
+  const chapterLabel = (chapter) => {
+    const title = typeof chapter?.title === "string" ? chapter.title.trim() : "";
+    if (title) {
+      return title;
+    }
+    return `Chapter ${Number(chapter?.index ?? 0) + 1}`;
+  };
+
+  const jumpToChapter = (chapterIndex) => {
+    const worker = workerRef.current;
+    if (!worker || !seekEnabled) {
+      log("Chapter seek unavailable for this source.");
+      return;
+    }
+    const index = Number.parseInt(String(chapterIndex), 10);
+    if (!Number.isInteger(index) || index < 0) {
+      return;
+    }
+    const chapter = chapters.find((item) => Number(item?.index) === index);
+    const fallbackSeconds = Number(chapter?.start);
+    clearAudioQueue();
+    if (Number.isFinite(fallbackSeconds) && fallbackSeconds >= 0) {
+      videoRef.current.pts = fallbackSeconds;
+      setSeekValue(fallbackSeconds);
+      updateStats();
+    }
+    setStatus("Seeking chapter...");
+    worker.postMessage({
+      type: "seekChapter",
+      chapterIndex: index,
+      fallbackSeconds:
+        Number.isFinite(fallbackSeconds) && fallbackSeconds >= 0
+          ? fallbackSeconds
+          : null,
+    });
   };
 
   const handleSeekInput = (event) => {
@@ -529,6 +578,37 @@ function App() {
       }
       if (msg.type === "log") {
         log(msg.message || "");
+        return;
+      }
+      if (msg.type === "chapters") {
+        const nextChapters = Array.isArray(msg.chapters)
+          ? msg.chapters.map((chapter, index) => ({
+              index: Number.isInteger(chapter?.index) ? chapter.index : index,
+              id: Number.isFinite(chapter?.id) ? chapter.id : index,
+              title: chapter?.title || "",
+              start: Number(chapter?.start),
+              end: Number(chapter?.end),
+            }))
+          : [];
+        setChapters(nextChapters);
+        setHasOrderedChapters(Boolean(msg.hasOrderedChapters));
+        setSelectedChapter((prev) => {
+          if (prev === "") return "";
+          const idx = Number.parseInt(String(prev), 10);
+          return nextChapters.some((item) => item.index === idx) ? prev : "";
+        });
+        return;
+      }
+      if (msg.type === "attachments") {
+        const nextAttachments = Array.isArray(msg.attachments)
+          ? msg.attachments.map((item, index) => ({
+              index: Number.isInteger(item?.index) ? item.index : index,
+              name: item?.name || "",
+              mimeType: item?.mimeType || "",
+              size: Number(item?.size) || 0,
+            }))
+          : [];
+        setAttachments(nextAttachments);
         return;
       }
       if (msg.type === "seekInfo") {
@@ -702,6 +782,59 @@ function App() {
         <button className="stop" onClick={stopPlayback} disabled={!ready}>
           Stop
         </button>
+      </section>
+
+      <section className="panel metadata-grid">
+        <div className="field">
+          <label htmlFor="chapterSelect">Chapters</label>
+          <div className="chapter-row">
+            <select
+              id="chapterSelect"
+              value={selectedChapter}
+              disabled={chapters.length === 0 || !seekEnabled}
+              onChange={(event) => setSelectedChapter(event.target.value)}
+            >
+              <option value="">Select chapter</option>
+              {chapters.map((chapter) => (
+                <option key={chapter.index} value={String(chapter.index)}>
+                  {`${formatTime(Number(chapter.start) || 0)} - ${chapterLabel(chapter)}`}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => jumpToChapter(selectedChapter)}
+              disabled={!seekEnabled || selectedChapter === ""}
+            >
+              Go
+            </button>
+          </div>
+          <span className="hint">
+            {hasOrderedChapters
+              ? "Ordered chapters detected."
+              : "Standard chapter edition."}
+          </span>
+        </div>
+        <div className="field">
+          <label>Attachments ({attachments.length})</label>
+          <div className="attachment-list">
+            {attachments.length === 0 ? (
+              <div className="attachment-empty">No attachments detected.</div>
+            ) : (
+              attachments.map((item) => (
+                <div className="attachment-item" key={item.index}>
+                  <span className="attachment-name">
+                    {item.name || `attachment-${item.index}`}
+                  </span>
+                  <span className="attachment-meta">
+                    {(item.mimeType || "application/octet-stream") +
+                      " - " +
+                      formatBytes(item.size || 0)}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       </section>
 
       <section className="player" ref={playerRef}>

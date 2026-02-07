@@ -118,6 +118,39 @@ const createApi = (Module) => ({
     "number",
     "number",
   ]),
+  chaptersCount: cwrapMaybe(Module, "ffmpeg_wasm_chapters_count", "number", [
+    "number",
+  ]),
+  hasOrderedChapters: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_has_ordered_chapters",
+    "number",
+    ["number"]
+  ),
+  chapterStartSeconds: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_chapter_start_seconds",
+    "number",
+    ["number", "number"]
+  ),
+  chapterEndSeconds: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_chapter_end_seconds",
+    "number",
+    ["number", "number"]
+  ),
+  chapterTitle: cwrapMaybe(Module, "ffmpeg_wasm_chapter_title", "string", [
+    "number",
+    "number",
+  ]),
+  chapterId: cwrapMaybe(Module, "ffmpeg_wasm_chapter_id", "number", [
+    "number",
+    "number",
+  ]),
+  seekChapter: cwrapMaybe(Module, "ffmpeg_wasm_seek_chapter", "number", [
+    "number",
+    "number",
+  ]),
   setKeepAll: Module.cwrap("ffmpeg_wasm_set_keep_all", null, [
     "number",
     "number",
@@ -167,6 +200,26 @@ const createApi = (Module) => ({
     "number",
     ["number", "number"]
   ),
+  attachmentsCount: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_attachments_count",
+    "number",
+    ["number"]
+  ),
+  attachmentName: cwrapMaybe(Module, "ffmpeg_wasm_attachment_name", "string", [
+    "number",
+    "number",
+  ]),
+  attachmentMimeType: cwrapMaybe(
+    Module,
+    "ffmpeg_wasm_attachment_mime_type",
+    "string",
+    ["number", "number"]
+  ),
+  attachmentSize: cwrapMaybe(Module, "ffmpeg_wasm_attachment_size", "number", [
+    "number",
+    "number",
+  ]),
   selectedVideoStream: cwrapMaybe(
     Module,
     "ffmpeg_wasm_selected_video_stream",
@@ -279,6 +332,86 @@ const getStreamsPayload = () => {
 
 const emitStreams = () => {
   const payload = getStreamsPayload();
+  if (payload) {
+    postMessage(payload);
+  }
+};
+
+const getChaptersPayload = () => {
+  if (
+    !state.api ||
+    !state.ctx ||
+    !state.opened ||
+    !state.api.chaptersCount ||
+    !state.api.chapterStartSeconds
+  ) {
+    return { type: "chapters", chapters: [], hasOrderedChapters: false };
+  }
+  const count = state.api.chaptersCount(state.ctx);
+  const safeCount = Number.isFinite(count) && count > 0 ? count : 0;
+  const hasOrderedChapters = state.api.hasOrderedChapters
+    ? Boolean(state.api.hasOrderedChapters(state.ctx))
+    : false;
+  const chapters = [];
+  for (let i = 0; i < safeCount; i += 1) {
+    const start = state.api.chapterStartSeconds(state.ctx, i);
+    const end = state.api.chapterEndSeconds
+      ? state.api.chapterEndSeconds(state.ctx, i)
+      : NaN;
+    const title = state.api.chapterTitle
+      ? state.api.chapterTitle(state.ctx, i)
+      : null;
+    const chapterId = state.api.chapterId ? state.api.chapterId(state.ctx, i) : i;
+    chapters.push({
+      index: i,
+      id: chapterId,
+      title: title || "",
+      start: Number.isFinite(start) ? start : 0,
+      end: Number.isFinite(end) ? end : null,
+    });
+  }
+  return {
+    type: "chapters",
+    chapters,
+    hasOrderedChapters,
+  };
+};
+
+const emitChapters = () => {
+  const payload = getChaptersPayload();
+  if (payload) {
+    postMessage(payload);
+  }
+};
+
+const getAttachmentsPayload = () => {
+  if (
+    !state.api ||
+    !state.ctx ||
+    !state.opened ||
+    !state.api.attachmentsCount ||
+    !state.api.attachmentName
+  ) {
+    return { type: "attachments", attachments: [] };
+  }
+  const count = state.api.attachmentsCount(state.ctx);
+  const safeCount = Number.isFinite(count) && count > 0 ? count : 0;
+  const attachments = [];
+  for (let i = 0; i < safeCount; i += 1) {
+    const name = state.api.attachmentName(state.ctx, i) || "";
+    const mimeType = state.api.attachmentMimeType
+      ? state.api.attachmentMimeType(state.ctx, i) || ""
+      : "";
+    const size = state.api.attachmentSize
+      ? state.api.attachmentSize(state.ctx, i)
+      : 0;
+    attachments.push({ index: i, name, mimeType, size });
+  }
+  return { type: "attachments", attachments };
+};
+
+const emitAttachments = () => {
+  const payload = getAttachmentsPayload();
   if (payload) {
     postMessage(payload);
   }
@@ -479,6 +612,8 @@ const tryOpen = () => {
       }
     }
     emitStreams();
+    emitChapters();
+    emitAttachments();
     emitStats(true);
     startDecodeLoop(0);
   } else if (ret !== state.lastOpenError) {
@@ -1176,6 +1311,65 @@ const performSeek = (seconds) => {
   startDecodeLoop(0);
 };
 
+const performSeekChapter = (chapterIndex, fallbackSeconds) => {
+  if (!state.ctx || !state.opened) {
+    postLog("Chapter seek unavailable before media is opened.");
+    return;
+  }
+
+  const index = Number(chapterIndex);
+  if (!Number.isInteger(index) || index < 0) {
+    postLog(`Invalid chapter index: ${chapterIndex}`);
+    return;
+  }
+
+  let target = Number(fallbackSeconds);
+  if (
+    state.api.chapterStartSeconds &&
+    state.api.chaptersCount &&
+    index < state.api.chaptersCount(state.ctx)
+  ) {
+    const chapterStart = state.api.chapterStartSeconds(state.ctx, index);
+    if (Number.isFinite(chapterStart) && chapterStart >= 0) {
+      target = chapterStart;
+    }
+  }
+
+  if (state.api.seekChapter && hasExport("ffmpeg_wasm_seek_chapter")) {
+    stopDecodeLoop();
+    postMessage({ type: "audioClear" });
+
+    const ret = state.api.seekChapter(state.ctx, index);
+    if (ret >= 0) {
+      state.seeking = true;
+      state.seekTarget = Number.isFinite(target) ? Math.max(0, target) : null;
+      state.basePts = null;
+      state.baseWall = 0;
+      state.currentTime = 0;
+      state.frames = 0;
+      postStatus("Seeking chapter...");
+      if (
+        state.api.setAudioEnabled &&
+        hasExport("ffmpeg_wasm_set_audio_enabled")
+      ) {
+        state.api.setAudioEnabled(state.ctx, 0);
+      }
+      emitStats(true);
+      startDecodeLoop(0);
+      return;
+    }
+
+    postLog(`seekChapter failed (${ret}); trying timestamp fallback.`);
+  }
+
+  if (Number.isFinite(target)) {
+    performSeek(target);
+    return;
+  }
+
+  postLog("Chapter seek fallback unavailable (missing timestamp).");
+};
+
 const setRenderMode = (mode) => {
   state.renderMode = mode === "webgl" ? "webgl" : "2d";
   if (state.renderMode === "2d") {
@@ -1322,6 +1516,8 @@ onmessage = (event) => {
     resetPlayback();
   } else if (msg.type === "seek") {
     performSeek(Number(msg.seconds) || 0);
+  } else if (msg.type === "seekChapter") {
+    performSeekChapter(msg.chapterIndex, msg.fallbackSeconds);
   } else if (msg.type === "renderMode") {
     setRenderMode(msg.mode);
   } else if (msg.type === "selectStreams") {
