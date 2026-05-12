@@ -1,8 +1,8 @@
 # FFmpeg WASM HEVC
 
-Goal: build FFmpeg to WebAssembly for HEVC playback in Chromium. Single-threaded proof first.
+Goal: build FFmpeg to WebAssembly for HEVC/AV1 playback in Chromium.
 
-Status: buildable. Includes a custom AVIO decode API for streaming.
+Status: buildable. Includes a custom AVIO decode API for streaming, a software AV1 path through dav1d, SIMD release builds, and an optional pthread WASM build for high-resolution AV1 playback. Release builds reserve an 8 MB C stack so decoder-heavy AV1 paths do not overflow the default WASM stack.
 
 ## Project layout
 - `scripts/` build tooling
@@ -15,11 +15,13 @@ Status: buildable. Includes a custom AVIO decode API for streaming.
 1. `./scripts/bootstrap-emsdk.sh`
 2. `./scripts/build-ffmpeg.sh` (defaults to LGPL)
 3. Output: `build/ffmpeg-wasm/ffmpeg_wasm.js` + `build/ffmpeg-wasm/ffmpeg_wasm.wasm`
+4. For 4K AV1 playback: `FFMPEG_WASM_THREADS=4 ./scripts/build-ffmpeg.sh --release`
+5. For browser diagnostics: `./scripts/build-ffmpeg.sh --debug` then `./scripts/prepare-demo-assets.sh --debug`
 
 ## Build variants (license + patent risk)
-- `royaltyfree` / `royaltyfree-lgpl`: AV1/VP9/Opus only, LGPL-friendly, avoids patent-encumbered codecs. Output: `build/ffmpeg-wasm-royaltyfree/`.
-- `full` (default): HEVC + AV1 with common extras, LGPL-friendly but patent-encumbered. Output: `build/ffmpeg-wasm/`.
-- `gpl`: HEVC + AV1 with common extras, GPL build (open-source required), patent-encumbered. Output: `build/ffmpeg-wasm-gpl/`.
+- `royaltyfree` / `royaltyfree-lgpl`: AV1 via dav1d, VP9, and Opus only, LGPL-friendly, avoids patent-encumbered codecs. Output: `build/ffmpeg-wasm-royaltyfree/`.
+- `full` (default): HEVC + AV1 via dav1d with common extras, LGPL-friendly but patent-encumbered. Output: `build/ffmpeg-wasm/`.
+- `gpl`: HEVC + AV1 via dav1d with common extras, GPL build (open-source required), patent-encumbered. Output: `build/ffmpeg-wasm-gpl/`.
 - `gpl-royaltyfree` / `royaltyfree-gpl`: royalty-free codec set with GPL obligations. Output: `build/ffmpeg-wasm-gpl-royaltyfree/`.
 - `nonfree`: non-redistributable build. Unsafe to ship publicly or monetize. Output: `build/ffmpeg-wasm-nonfree/`.
 
@@ -29,20 +31,27 @@ Build commands:
 - `./scripts/build-ffmpeg.sh --variant gpl`
 - `./scripts/build-ffmpeg.sh --variant gpl-royaltyfree` (or `royaltyfree-gpl`)
 - `./scripts/build-ffmpeg.sh --variant nonfree`
+- `FFMPEG_WASM_THREADS=4 ./scripts/build-ffmpeg.sh --release` for a pthread build at `build/ffmpeg-wasm-pthreads4/`. This sets 4 native decoder threads and defaults the Emscripten browser worker pool to 8 workers; override with `FFMPEG_WASM_THREAD_POOL=N` only when investigating pthread scheduling.
 
 ## Demos
 Before running a demo, copy the WASM artifacts into the demo folders:
 `./scripts/prepare-demo-assets.sh` (or `--variant royaltyfree|full|gpl|nonfree`)
 
+For the pthread build, copy with the same thread count:
+`FFMPEG_WASM_THREADS=4 ./scripts/prepare-demo-assets.sh --release`
+
+Use release assets for normal playback and performance checks. Debug assets include source maps and assertions and can make 1080p HEVC/AV1 playback look choppy.
+
 HTML demo:
-- Serve `web/` with a static server (file:// will not load WASM).
-- Example: `python3 -m http.server --directory web 8080`
+- Serve `web/` with COOP/COEP headers when using pthread assets.
+- Example: `node scripts/serve-web.mjs --port 8080`
 - Includes Matroska-first UI, audio worklet playback, and optional WebGL rendering.
 
 React demo:
 - `cd web-react`
 - `npm install`
 - `npm run dev`
+- Vite is configured with COOP/COEP headers so pthread WASM assets can use `SharedArrayBuffer`.
 
 ## Node Harness
 Use `scripts/ffmpeg-wasm-node.mjs` to mirror wasm exports outside the browser.
@@ -52,7 +61,42 @@ Commands:
 - `node scripts/ffmpeg-wasm-node.mjs smoke /path/to/video.mkv 60`
 - `node scripts/test-seek-internals.mjs /path/to/video.mkv` (builds a test wasm and validates internal seek behavior)
 - `node scripts/test-core-features.mjs /path/to/video.mkv [wasm_js] [wasm_wasm]` (runs core decode/selection/seek checks)
+- `node scripts/test-codec-regressions.mjs [wasm_js] [wasm_wasm]` (runs local HEVC read_at/seek, AV1 dav1d stack, source-FPS cadence, and native real-time throughput regressions; override fixtures with `FFMPEG_WASM_HEVC_SAMPLE` and `FFMPEG_WASM_AV1_SAMPLE`)
+- `node scripts/test-playback-performance.mjs /path/to/video.webm [wasm_js] [wasm_wasm]` (measures source FPS cadence, decode-only throughput, and decode+RGBA throughput against real-time)
+- `node scripts/test-http-range-read-at.mjs` (serves a late-moov MP4 through HTTP Range and validates native `read_at` open/seek)
+- `node scripts/test-audio-worklet-buffer.mjs` (checks AudioWorklet queue/drop/underrun behavior)
+- `node scripts/test-v3-regressions.mjs [wasm_js] [wasm_wasm]` (generates late-moov MP4, audio-only, multi-track, and subtitle fixtures)
 - `node scripts/test-mkv-regressions.mjs [--vectors-dir /tmp/ffmpeg-mkv-vectors] [--ordered-chapters /path/to/ordered.mkv]` (generates and validates no-cues/sparse-cues vectors; optionally validates ordered-chapters)
+
+The Node harness, worker, and Emscripten export list share `web/ffmpeg-wasm-api.js`.
+
+## Browser FATE Runner
+FFmpeg's upstream FATE suite is shell/make based, so the browser mapping uses the
+FATE case metadata and sample corpus, then runs browser-native wasm checks:
+metadata open, decode/RGBA conversion, and duration-relative seek checks.
+
+Generate the manifest from the vendored FFmpeg tree:
+
+```bash
+node scripts/build-browser-fate-manifest.mjs
+```
+
+Sync a targeted sample set instead of the full FATE corpus:
+
+```bash
+node scripts/sync-browser-fate-samples.mjs --tag browser-smoke --samples /tmp/fate-suite
+node scripts/sync-browser-fate-samples.mjs --tag av1 --samples /tmp/fate-suite
+node scripts/sync-browser-fate-samples.mjs --tag hevc --samples /tmp/fate-suite
+```
+
+Serve the browser runner:
+
+```bash
+node scripts/serve-browser-fate.mjs --samples /tmp/fate-suite --port 8090
+```
+
+Open `http://127.0.0.1:8090/fate-browser.html`. The runner defaults to
+`browser-smoke` and has explicit AV1 and HEVC tag filters.
 
 As a module:
 ```js
@@ -73,8 +117,8 @@ See `docs/RECIPE.md` for a step-by-step build narrative, decision rationale, and
 This build exposes a small API to push bytes from JS into FFmpeg and decode frames.
 
 IO modes:
-- `append` (default): push incoming chunks with `ffmpeg_wasm_append`.
-- `read_at` (local files): set `ffmpeg_wasm_set_io_mode(..., 1)` and provide `Module.ffmpegReadAt(offset, len, dstPtr)` for native demuxer seeking.
+- `append` (default): push incoming chunks with `ffmpeg_wasm_append`. This is progressive-only and seeking is disabled.
+- `read_at` (local files and HTTP Range-capable URLs): set `ffmpeg_wasm_set_io_mode(..., 1)` and provide `Module.ffmpegReadAt(offset, len, dstPtr)` for native demuxer seeking.
 
 Flow:
 1. Create context with a buffer size.
@@ -89,7 +133,7 @@ Flow:
 6. For audio, read interleaved float32 stereo at 48 kHz via the audio getters.
 
 Notes:
-- For MP4 streaming, the `moov` atom should be at the start (faststart), or probing may fail.
+- For MP4 append streaming, the `moov` atom should be at the start (faststart), or probing may fail. Local files and Range-capable URLs use `read_at`, so late `moov` metadata is available.
 - The buffer grows as you append; for long streams, segment or reset between items.
 - Frame pointers are valid until the next decode call.
 
@@ -126,4 +170,6 @@ while (true) {
 
 ## Notes
 - HEVC licensing/patents apply; verify your use case. The `royaltyfree` variant avoids HEVC.
-- Chromium-only target for now; no COOP/COEP required since we're single-threaded.
+- AV1 uses dav1d software decoding. FFmpeg's built-in AV1 decoder is not used because the WASM build has no hardware acceleration path.
+- Chromium-only target for now. Single-threaded builds do not need COOP/COEP; pthread builds require `SharedArrayBuffer` and COOP/COEP headers.
+- Browser-native debugging workflow: see `docs/DEBUGGING.md`.

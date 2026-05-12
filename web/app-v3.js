@@ -29,6 +29,16 @@ const ptsValueEl = document.getElementById("ptsValue");
 const audioInfoEl = document.getElementById("audioInfo");
 const audioClockEl = document.getElementById("audioClock"); // Not in v3 HTML? removed or forgot. Added implicitly or removed? It was in v2. It's fine if missing.
 const osdEl = document.getElementById("osd");
+const sourceOverlay = document.getElementById("sourceOverlay");
+const sourceTitleEl = document.getElementById("sourceTitle");
+const sourceMetaEl = document.getElementById("sourceMeta");
+const sourceInfoEl = document.getElementById("sourceInfo");
+const containerInfoEl = document.getElementById("containerInfo");
+const seekInfoEl = document.getElementById("seekInfo");
+const audioQueueInfoEl = document.getElementById("audioQueueInfo");
+const audioDropInfoEl = document.getElementById("audioDropInfo");
+const trackInfoEl = document.getElementById("trackInfo");
+const subtitleInfoEl = document.getElementById("subtitleInfo");
 
 // New Menu Elements
 const videoTrackMenu = document.getElementById("videoTrackMenu");
@@ -63,7 +73,40 @@ const menuCloseBtn = document.getElementById("menuCloseBtn");
 const shortcutsBtn = document.getElementById("shortcutsBtn");
 
 const DEFAULT_AUDIO_RATE = 48000;
+const MAX_PENDING_AUDIO_BUFFERS = 96;
 const PLAYBACK_SPEEDS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+const MEDIA_TYPE_VIDEO = 0;
+const MEDIA_TYPE_AUDIO = 1;
+const MEDIA_TYPE_SUBTITLE = 3;
+const FORMAT_BY_EXTENSION = new Map([
+  ["mp4", "mov"],
+  ["m4v", "mov"],
+  ["mov", "mov"],
+  ["3gp", "mov"],
+  ["3g2", "mov"],
+  ["mkv", "matroska"],
+  ["webm", "matroska"],
+  ["avi", "avi"],
+  ["ts", "mpegts"],
+  ["mts", "mpegts"],
+  ["m2ts", "mpegts"],
+  ["mp3", "mp3"],
+  ["flac", "flac"],
+  ["ogg", "ogg"],
+  ["oga", "ogg"],
+  ["opus", "ogg"],
+  ["wav", "wav"],
+]);
+const FORMAT_LABELS = {
+  mov: "MP4 / QuickTime",
+  matroska: "Matroska / WebM",
+  avi: "AVI",
+  mpegts: "MPEG-TS",
+  mp3: "MP3",
+  flac: "FLAC",
+  ogg: "Ogg",
+  wav: "WAV",
+};
 
 const state = {
   worker: null,
@@ -76,6 +119,24 @@ const state = {
   seekHint: "",
   renderMode: "2d",
   formatHint: "",
+  source: {
+    kind: "",
+    name: "",
+    formatHint: "",
+    formatSource: "auto",
+    ioMode: "",
+    range: false,
+    seekable: false,
+    size: 0,
+  },
+  media: {
+    hasVideo: false,
+    hasAudio: false,
+    hasSubtitle: false,
+    videoCount: 0,
+    audioCount: 0,
+    subtitleCount: 0,
+  },
   frames: 0,
   bytes: 0,
   pts: 0,
@@ -93,6 +154,9 @@ const state = {
     basePts: null,
     startTime: 0,
     bufferedSeconds: 0,
+    availableFrames: 0,
+    droppedSamples: 0,
+    underrunFrames: 0,
     pending: [],
     warned: false,
   },
@@ -149,6 +213,117 @@ const buildTrackLabel = (stream) => {
   return parts.join(" · ");
 };
 
+const extensionFromName = (name) => {
+  const clean = String(name || "").split("?")[0].split("#")[0];
+  const match = /\.([a-z0-9]+)$/i.exec(clean);
+  return match ? match[1].toLowerCase() : "";
+};
+
+const inferFormatFromExtension = (name) =>
+  FORMAT_BY_EXTENSION.get(extensionFromName(name)) || "";
+
+const inferFormatFromBytes = (bytes) => {
+  if (!bytes || bytes.length < 4) return "";
+  if (
+    bytes[0] === 0x1a &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0xdf &&
+    bytes[3] === 0xa3
+  ) {
+    return "matroska";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  ) {
+    return "mov";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x41 &&
+    bytes[9] === 0x56 &&
+    bytes[10] === 0x49 &&
+    bytes[11] === 0x20
+  ) {
+    return "avi";
+  }
+  if (bytes[0] === 0x47 || (bytes.length > 188 && bytes[188] === 0x47)) {
+    return "mpegts";
+  }
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    return "mp3";
+  }
+  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) {
+    return "mp3";
+  }
+  if (
+    bytes[0] === 0x66 &&
+    bytes[1] === 0x4c &&
+    bytes[2] === 0x61 &&
+    bytes[3] === 0x43
+  ) {
+    return "flac";
+  }
+  if (
+    bytes[0] === 0x4f &&
+    bytes[1] === 0x67 &&
+    bytes[2] === 0x67 &&
+    bytes[3] === 0x53
+  ) {
+    return "ogg";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x41 &&
+    bytes[10] === 0x56 &&
+    bytes[11] === 0x45
+  ) {
+    return "wav";
+  }
+  return "";
+};
+
+const formatLabel = (format) => FORMAT_LABELS[format] || (format ? format : "Auto");
+
+const detectSource = async (file, url) => {
+  const sourceName = file ? file.name : url || "";
+  let formatHint = inferFormatFromExtension(sourceName);
+  let formatSource = formatHint ? "extension" : "auto";
+
+  if (file) {
+    try {
+      const sample = new Uint8Array(await file.slice(0, 512).arrayBuffer());
+      const magicHint = inferFormatFromBytes(sample);
+      if (magicHint) {
+        formatHint = magicHint;
+        formatSource = "magic bytes";
+      }
+    } catch (err) {
+      log(`Container probe failed: ${err.message}`);
+    }
+  }
+
+  return {
+    kind: file ? "file" : "url",
+    name: sourceName,
+    size: file?.size || 0,
+    formatHint,
+    formatSource,
+  };
+};
+
 const createMenuItem = (label, onClick, isChecked) => {
   const item = document.createElement("div");
   item.className = "menu-item";
@@ -172,6 +347,12 @@ const createMenuItem = (label, onClick, isChecked) => {
 
 const populateTrackSelects = (payload) => {
   const streams = Array.isArray(payload.streams) ? payload.streams : [];
+  if (Number.isFinite(payload.selectedVideo)) {
+    state.tracks.video = payload.selectedVideo;
+  }
+  if (Number.isFinite(payload.selectedAudio)) {
+    state.tracks.audio = payload.audioEnabled === false ? -2 : payload.selectedAudio;
+  }
 
   // Video Tracks
   if (videoTrackMenu) {
@@ -252,6 +433,26 @@ const populateSubtitleTracks = (streams) => {
       )
     );
   }
+};
+
+const setMediaSummary = (payload) => {
+  const streams = Array.isArray(payload?.streams) ? payload.streams : [];
+  const videoCount = streams.filter((stream) => stream?.mediaType === MEDIA_TYPE_VIDEO).length;
+  const audioCount = streams.filter((stream) => stream?.mediaType === MEDIA_TYPE_AUDIO).length;
+  const subtitleCount = streams.filter((stream) => stream?.mediaType === MEDIA_TYPE_SUBTITLE).length;
+  state.media = {
+    hasVideo: videoCount > 0,
+    hasAudio: audioCount > 0,
+    hasSubtitle: subtitleCount > 0,
+    videoCount,
+    audioCount,
+    subtitleCount,
+  };
+  if (Number.isFinite(payload?.selectedSubtitle)) {
+    state.tracks.subtitle = payload.subtitlesEnabled === false ? -2 : payload.selectedSubtitle;
+  }
+  updateMediaMode();
+  updateDiagnostics();
 };
 
 const chapterDisplayTitle = (chapter) => {
@@ -359,10 +560,10 @@ const setChapterData = (payload) => {
     index: Number.isInteger(chapter?.index) ? chapter.index : index,
     id: Number.isFinite(chapter?.id) ? chapter.id : index,
     title: chapter?.title || "",
-    start: Number(chapter?.start),
-    end: Number(chapter?.end),
+    start: Number(chapter?.start ?? chapter?.startSeconds),
+    end: Number(chapter?.end ?? chapter?.endSeconds),
   }));
-  state.hasOrderedChapters = Boolean(payload?.hasOrderedChapters);
+  state.hasOrderedChapters = Boolean(payload?.hasOrderedChapters ?? payload?.ordered);
   renderChapterMenu();
 };
 
@@ -379,11 +580,103 @@ const setAttachmentData = (payload) => {
   renderAttachmentInspector();
 };
 
+const setSourceInfo = (info = {}) => {
+  state.source = {
+    ...state.source,
+    ...info,
+  };
+  state.formatHint = state.source.formatHint || "";
+  updateSourceOverlay();
+  updateDiagnostics();
+};
+
+const updateSourceOverlay = () => {
+  if (!canvasWrap) return;
+  const hasName = Boolean(state.source.name);
+  canvasWrap.classList.toggle("has-media", state.started || hasName);
+  canvasWrap.classList.toggle(
+    "loading",
+    state.started && !state.frames && !state.media.hasAudio && state.playing,
+  );
+  if (sourceTitleEl) {
+    if (!hasName) {
+      sourceTitleEl.textContent = "Open a media file";
+    } else if (state.media.hasAudio && !state.media.hasVideo) {
+      sourceTitleEl.textContent = "Audio playback";
+    } else {
+      sourceTitleEl.textContent = state.source.name;
+    }
+  }
+  if (sourceMetaEl) {
+    const parts = [];
+    if (state.source.formatHint) {
+      parts.push(`${formatLabel(state.source.formatHint)} from ${state.source.formatSource || "auto"}`);
+    } else {
+      parts.push("Container auto-detect");
+    }
+    if (state.source.ioMode) {
+      parts.push(state.source.ioMode);
+    }
+    if (state.source.range) {
+      parts.push("HTTP Range");
+    }
+    sourceMetaEl.textContent = parts.join(" · ");
+  }
+};
+
+const updateMediaMode = () => {
+  if (!canvasWrap) return;
+  const audioOnly = state.media.hasAudio && !state.media.hasVideo;
+  canvasWrap.classList.toggle("audio-only", audioOnly);
+};
+
+const updateDiagnostics = () => {
+  if (sourceInfoEl) {
+    const kind = state.source.kind || "-";
+    const size = state.source.size ? ` · ${formatBytes(state.source.size)}` : "";
+    sourceInfoEl.textContent = `${kind}${size}`;
+  }
+  if (containerInfoEl) {
+    containerInfoEl.textContent = state.source.formatHint
+      ? `${formatLabel(state.source.formatHint)} (${state.source.formatSource || "auto"})`
+      : "Auto";
+  }
+  if (seekInfoEl) {
+    seekInfoEl.textContent = state.seekEnabled
+      ? state.source.range
+        ? "Range read_at"
+        : "read_at"
+      : state.seekHint || "-";
+  }
+  if (audioQueueInfoEl) {
+    const buffered = Number.isFinite(state.audio.bufferedSeconds)
+      ? `${state.audio.bufferedSeconds.toFixed(2)}s`
+      : "-";
+    const pending = state.audio.pending.length;
+    audioQueueInfoEl.textContent = `${buffered} · ${pending} pending`;
+  }
+  if (audioDropInfoEl) {
+    audioDropInfoEl.textContent = `${state.audio.droppedSamples || 0} / ${state.audio.underrunFrames || 0}`;
+  }
+  if (trackInfoEl) {
+    trackInfoEl.textContent = `${state.media.videoCount}V ${state.media.audioCount}A ${state.media.subtitleCount}S`;
+  }
+  if (subtitleInfoEl) {
+    subtitleInfoEl.textContent = state.tracks.subtitle === -2
+      ? "off"
+      : state.tracks.subtitle === -1
+        ? "auto"
+        : `#${state.tracks.subtitle}`;
+  }
+  updateSourceOverlay();
+};
+
 const setVideoTrack = (index) => {
   state.tracks.video = index;
   saveTrackPrefs();
   updateMenuCheckmarks(); // Refresh UI
   applyTrackSelection();
+  updateDiagnostics();
 };
 
 const setAudioTrack = (index) => {
@@ -391,6 +684,7 @@ const setAudioTrack = (index) => {
   saveTrackPrefs();
   updateMenuCheckmarks();
   applyTrackSelection();
+  updateDiagnostics();
 };
 
 const setSubtitleTrack = (index) => {
@@ -402,6 +696,7 @@ const setSubtitleTrack = (index) => {
       subtitleStreamIndex: state.tracks.subtitle,
     });
   }
+  updateDiagnostics();
 };
 
 const updateMenuCheckmarks = () => {
@@ -459,13 +754,6 @@ const updateMenuCheckmarks = () => {
     el.style.color = isSelected ? "var(--primary-color)" : "#eee";
   });
 
-  // Container Hint
-  document.querySelectorAll('[data-action="setFormat"]').forEach((el) => {
-    const val = el.getAttribute("data-value");
-    const isSelected = state.formatHint === val;
-    el.style.fontWeight = isSelected ? "bold" : "normal";
-    el.style.color = isSelected ? "var(--primary-color)" : "#eee";
-  });
 };
 
 const applyTrackSelection = () => {
@@ -564,6 +852,7 @@ const setSeekEnabled = (enabled, reason) => {
     if (reason) seekRange.title = reason;
     else seekRange.removeAttribute("title");
   }
+  updateDiagnostics();
 };
 
 const setDuration = (seconds) => {
@@ -599,6 +888,9 @@ const resetAudioState = () => {
     basePts: null,
     startTime: 0,
     bufferedSeconds: 0,
+    availableFrames: 0,
+    droppedSamples: 0,
+    underrunFrames: 0,
     pending: [],
     warned: false,
   };
@@ -643,6 +935,7 @@ const updateAudioDisplay = () => {
     }
   }
   // No audio clock display in V3 html, but we can log it or use it for sync
+  updateDiagnostics();
 };
 
 const updateStats = () => {
@@ -650,6 +943,7 @@ const updateStats = () => {
   if (bytesCountEl) bytesCountEl.textContent = formatBytes(state.bytes);
   if (ptsValueEl) ptsValueEl.textContent = `${state.pts.toFixed(2)}s`;
   updateAudioDisplay();
+  updateDiagnostics();
 };
 
 const syncAudioClock = () => {
@@ -660,11 +954,14 @@ const syncAudioClock = () => {
 };
 
 const flushAudioQueue = () => {
-  if (!state.audio.ready || !state.audio.worklet) return;
+  if (!state.audio.ready || !state.audio.worklet) return 0;
+  let flushed = 0;
   while (state.audio.pending.length) {
     const buffer = state.audio.pending.shift();
     state.audio.worklet.port.postMessage({ type: "push", buffer }, [buffer]);
+    flushed += 1;
   }
+  return flushed;
 };
 
 const initAudio = (sampleRate, channels) => {
@@ -701,6 +998,20 @@ const initAudio = (sampleRate, channels) => {
     worklet.connect(gain).connect(audioContext.destination);
     worklet.port.onmessage = (event) => {
       if (!event.data || event.data.type !== "status") return;
+      const { availableFrames, bufferedSeconds, droppedSamples, underrunFrames } = event.data;
+      if (Number.isFinite(availableFrames)) {
+        state.audio.availableFrames = availableFrames;
+      }
+      if (Number.isFinite(bufferedSeconds)) {
+        state.audio.bufferedSeconds = bufferedSeconds;
+      }
+      if (Number.isFinite(droppedSamples)) {
+        state.audio.droppedSamples = droppedSamples;
+      }
+      if (Number.isFinite(underrunFrames)) {
+        state.audio.underrunFrames = underrunFrames;
+      }
+      updateDiagnostics();
     };
     worklet.port.postMessage({ type: "config", channels });
 
@@ -715,9 +1026,8 @@ const initAudio = (sampleRate, channels) => {
     applyGain();
     updateAudioDisplay();
 
-    if (state.playing) await audioContext.resume();
-
     flushAudioQueue();
+    if (state.playing) await audioContext.resume();
     return audioContext;
   })().catch((err) => {
     log(`Audio init failed: ${err.message}`);
@@ -730,7 +1040,9 @@ const initAudio = (sampleRate, channels) => {
 
 const queueAudioBuffer = (buffer, pts) => {
   if (!state.audio.ready || !state.audio.worklet) {
-    if (state.audio.pending.length < 12) state.audio.pending.push(buffer);
+    if (state.audio.pending.length < MAX_PENDING_AUDIO_BUFFERS) {
+      state.audio.pending.push(buffer);
+    }
   } else {
     state.audio.worklet.port.postMessage({ type: "push", buffer }, [buffer]);
   }
@@ -784,6 +1096,14 @@ const resetUi = () => {
   state.chapters = [];
   state.hasOrderedChapters = false;
   state.attachments = [];
+  state.media = {
+    hasVideo: false,
+    hasAudio: false,
+    hasSubtitle: false,
+    videoCount: 0,
+    audioCount: 0,
+    subtitleCount: 0,
+  };
   setDuration(0);
   updateTimeline(0);
   if (resolutionEl) resolutionEl.textContent = "-";
@@ -792,6 +1112,8 @@ const resetUi = () => {
   updateStats();
   renderChapterMenu();
   renderAttachmentInspector();
+  updateMediaMode();
+  updateDiagnostics();
 };
 
 let activityTimeout;
@@ -860,7 +1182,7 @@ const pausePlayback = () => {
   setPausedState(true);
 };
 
-const startPlayback = () => {
+const startPlayback = async () => {
   if (!state.ready || !state.worker) return;
 
   const file = fileInput.files && fileInput.files[0];
@@ -875,6 +1197,17 @@ const startPlayback = () => {
     }
     setChapterData({ chapters: [], hasOrderedChapters: false });
     setAttachmentData({ attachments: [] });
+    if (canvasWrap) {
+      canvasWrap.classList.remove("error");
+      canvasWrap.classList.add("loading");
+    }
+    setStatus("Probing source...");
+    const sourceInfo = await detectSource(file || null, file ? "" : url);
+    setSourceInfo(sourceInfo);
+    log(
+      `Container ${sourceInfo.formatHint ? formatLabel(sourceInfo.formatHint) : "auto"} ` +
+        `from ${sourceInfo.formatSource}.`,
+    );
     const bufferMb = Number.parseInt(bufferSizeInput.value, 10) || 4;
     const bufferBytes = Math.max(1, bufferMb) * 1024 * 1024;
 
@@ -891,6 +1224,7 @@ const startPlayback = () => {
       file: file || null,
       url: file ? null : url || null,
       formatHint: state.formatHint,
+      sourceInfo,
       bufferBytes,
       videoStreamIndex: state.tracks.video,
       audioStreamIndex: state.tracks.audio,
@@ -967,6 +1301,19 @@ const initWorker = () => {
       return;
     }
 
+    if (msg.type === "subtitleDebug") {
+      log(
+        `SUB debug events=${msg.nEvents ?? "-"} first=${msg.firstStartMs ?? "-"}-${msg.firstEndMs ?? "-"}`,
+      );
+      return;
+    }
+
+    if (msg.type === "ffmpegLog") {
+      const level = Number.isFinite(msg.level) ? msg.level : "-";
+      log(`FFmpeg[${level}] ${msg.message || ""}`);
+      return;
+    }
+
     if (msg.type === "status") {
       setStatus(msg.message || "");
       return;
@@ -977,8 +1324,26 @@ const initWorker = () => {
       return;
     }
 
+    if (msg.type === "sourceInfo") {
+      setSourceInfo(msg.source || msg);
+      return;
+    }
+
+    if (msg.type === "debugSnapshot") {
+      const worker = msg.worker || {};
+      if (Number.isFinite(worker.heapBytes)) {
+        state.source.heapBytes = worker.heapBytes;
+      }
+      if (Number.isFinite(worker.duration) && worker.duration > 0) {
+        setDuration(worker.duration);
+      }
+      updateDiagnostics();
+      return;
+    }
+
     if (msg.type === "streams") {
       state.lastStreams = msg.streams; // Store for menu repopulation
+      setMediaSummary(msg);
       populateTrackSelects(msg);
       populateSubtitleTracks(msg.streams || []);
       return;
@@ -1011,6 +1376,9 @@ const initWorker = () => {
       state.frames = msg.frames || 0;
       state.bytes = msg.bytes || 0;
       state.pts = Number.isFinite(msg.pts) ? msg.pts : 0;
+      if (canvasWrap && (state.frames > 0 || state.media.hasAudio)) {
+        canvasWrap.classList.remove("loading");
+      }
       if (
         Number.isFinite(msg.duration) &&
         msg.duration > 0 &&
@@ -1047,6 +1415,16 @@ const initWorker = () => {
       startBtn.disabled = false;
       syncOverlayControls();
       setStatus("Ended");
+      return;
+    }
+
+    if (msg.type === "error") {
+      const detail = msg.message || msg.error || "Worker error";
+      log(`Error: ${detail}`);
+      setStatus("Error");
+      if (canvasWrap) canvasWrap.classList.add("error");
+      if (sourceTitleEl) sourceTitleEl.textContent = "Playback error";
+      if (sourceMetaEl) sourceMetaEl.textContent = detail;
       return;
     }
 
@@ -1096,9 +1474,6 @@ document.addEventListener("click", (e) => {
 
   if (action === "setRenderMode") {
     setRenderMode(value);
-  } else if (action === "setFormat") {
-    state.formatHint = value;
-    updateMenuCheckmarks();
   } else if (action === "setAspect") {
     setAspectRatio(value);
   } else if (action === "setSpeed") {
@@ -1240,21 +1615,16 @@ if (screenshotBtn)
 
 // Audio Delay
 const setAudioDelay = (seconds) => {
+  const previous = state.audioDelay || 0;
   state.audioDelay = seconds;
   if (state.audio.basePts !== null) {
-    state.audio.basePts += seconds - (state.lastAudioDelay || 0); // wait, simplified logic:
-    // Re-sync clock. The V2 logic was state.audio.basePts += (clamped - state.audioDelay);
-    // My implementation in V2 was slightly buggy if called repeatedly.
-    // Let's just adjust basePts by difference.
-    // Or better: don't touch basePts here, let syncAudioClock handle it?
-    // No, basePts is derived from stream. We modify effective start time.
-    // Simple V2 approach:
-    // state.audio.basePts += (newDelay - oldDelay);
+    state.audio.basePts += seconds - previous;
+    syncAudioClock();
   }
-  // We won't implement complex delay sync here for brevity, assume V2 logic was acceptable.
   if (audioDelayInput) audioDelayInput.value = (seconds * 1000).toString();
   if (audioDelayDisplay)
     audioDelayDisplay.textContent = `${(seconds * 1000).toFixed(0)}ms`;
+  updateDiagnostics();
 };
 
 if (audioDelayInput) {

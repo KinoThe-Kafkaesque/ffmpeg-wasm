@@ -2,6 +2,8 @@
 
 This document lists the 4 primary build variants and the codecs supported by each.
 
+> Current caveat: these lists still need generated-config scrutiny. `docs/TODO.md` tracks that as S005. Until then, treat this document as intended variant policy, not proof that FFmpeg disabled every unrelated default codec/demuxer.
+
 ## Variant Overview
 
 | Variant | License | Patent Status | Output Directory |
@@ -10,6 +12,8 @@ This document lists the 4 primary build variants and the codecs supported by eac
 | full | LGPL | Patent-encumbered | `build/ffmpeg-wasm/` |
 | gpl | GPL | Patent-encumbered | `build/ffmpeg-wasm-gpl/` |
 | gpl-royaltyfree | GPL | Royalty-free | `build/ffmpeg-wasm-gpl-royaltyfree/` |
+
+Append `-pthreadsN` to the output directory by setting `FFMPEG_WASM_THREADS=N` with `N > 1`; for example, the 4-thread full build writes `build/ffmpeg-wasm-pthreads4/` and emits `ffmpeg_wasm.worker.js`. `FFMPEG_WASM_THREADS` controls native decoder threads. The browser pthread worker pool defaults to `max(8, N * 2)` so FFmpeg/libdav1d has spare workers; override it with `FFMPEG_WASM_THREAD_POOL=M` only for scheduling experiments.
 
 ---
 
@@ -20,7 +24,7 @@ Strictly royalty-free codec set, avoiding patent-encumbered codecs like HEVC and
 **Aliases:** `royaltyfree-lgpl`
 
 ### Video Decoders
-- av1
+- av1 via libdav1d
 - vp9
 - vp8
 - theora
@@ -56,7 +60,7 @@ Default variant with common, widely-used codecs including HEVC and H.264. Patent
 
 ### Video Decoders
 - hevc
-- av1
+- av1 via libdav1d
 - h264
 - vp8
 - vp9
@@ -83,7 +87,7 @@ Identical codec set to "full" variant but requires GPL compliance (open-source o
 
 ### Video Decoders
 - hevc
-- av1
+- av1 via libdav1d
 - h264
 - vp8
 - vp9
@@ -111,7 +115,7 @@ Royalty-free codec set with GPL license obligations (open-source required). Comb
 **Aliases:** `royaltyfree-gpl`
 
 ### Video Decoders
-- av1
+- av1 via libdav1d
 - vp9
 - vp8
 - theora
@@ -151,6 +155,7 @@ Royalty-free codec set with GPL license obligations (open-source required). Comb
 ### Notes
 
 - **Patent-encumbered** variants include H.264/HEVC/AAC/MP3 which may require patent licenses for commercial use
-- **Royalty-free** variants use only codecs without known patent encumbrances (AV1, VP8/VP9, Opus, Vorbis, etc.)
+- **Royalty-free** variants use only codecs without known patent encumbrances (AV1 through dav1d, VP8/VP9, Opus, Vorbis, etc.)
+- **AV1 in WASM** uses the external libdav1d software decoder. FFmpeg's built-in AV1 decoder expects hardware acceleration in this build shape and returns `AVERROR(ENOSYS)` when no hardware pixel format is available.
 - **LGPL** variants can be used in proprietary applications with proper attribution
 - **GPL** variants require the entire application to be open-sourced under GPL

@@ -25,9 +25,10 @@ const assert = (cond, msg) => {
 const buildTestWasm = () => {
   mkdirSync(TMP_DIR, { recursive: true });
   const cmd = `
-set -euo pipefail
-source third_party/emsdk/emsdk_env.sh >/dev/null
-emcc -O2 -DFFMPEG_WASM_TESTING=1 \
+	set -euo pipefail
+	source third_party/emsdk/emsdk_env.sh >/dev/null
+	EXPORTED_FUNCTIONS="$(node scripts/print-exported-functions.mjs --include-test-only)"
+	emcc -O2 -DFFMPEG_WASM_TESTING=1 \
   -s WASM=1 \
   -s MODULARIZE=1 \
   -s EXPORT_NAME=FFmpegWasm \
@@ -35,14 +36,15 @@ emcc -O2 -DFFMPEG_WASM_TESTING=1 \
   -s FILESYSTEM=0 \
   -s INITIAL_MEMORY=64MB \
   -s ALLOW_MEMORY_GROWTH=1 \
-  -s EXPORTED_FUNCTIONS='["_ffmpeg_wasm_create","_ffmpeg_wasm_destroy","_ffmpeg_wasm_append","_ffmpeg_wasm_set_eof","_ffmpeg_wasm_set_file_size","_ffmpeg_wasm_set_buffer_offset","_ffmpeg_wasm_set_io_mode","_ffmpeg_wasm_get_io_mode","_ffmpeg_wasm_set_cache_limit","_ffmpeg_wasm_open","_ffmpeg_wasm_seek_seconds","_ffmpeg_wasm_read_frame","_ffmpeg_wasm_frame_pts_seconds","_ffmpeg_wasm_duration_seconds","_ffmpeg_wasm_buffered_bytes","_ffmpeg_wasm_debug_seek_stream","_ffmpeg_wasm_debug_buffer_offset","_ffmpeg_wasm_debug_buffer_size","_ffmpeg_wasm_debug_buffer_read_pos","_ffmpeg_wasm_debug_byte_pos","_malloc","_free"]' \
+	  -s EXPORTED_FUNCTIONS="$EXPORTED_FUNCTIONS" \
   -s EXPORTED_RUNTIME_METHODS='["cwrap"]' \
   --no-entry \
   -Ibuild/ffmpeg-wasm/include \
   -Ibuild/ffmpeg-wasm/include/freetype2 \
-  -Ibuild/ffmpeg-wasm/include/fribidi \
-  -Ibuild/ffmpeg-wasm/include/ass \
-  src/ffmpeg_wasm.c \
+	  -Ibuild/ffmpeg-wasm/include/fribidi \
+	  -Ibuild/ffmpeg-wasm/include/ass \
+	  src/ffmpeg_wasm.c \
+	  src/ffmpeg_wasm_debug.c \
   -Lbuild/ffmpeg-wasm/lib \
   -Wl,--start-group \
   -lavformat -lavcodec -lswresample -lswscale -lavutil \
@@ -149,22 +151,15 @@ const runSeekRegressionCase = async (wasm, mediaPath) => {
     assert(duration > 0, `invalid duration: ${duration}`);
 
     const seekFwd = api.seek(ctx, 800);
-    assert(seekFwd === 0, `forward seek failed: ${seekFwd}`);
-    const fwd = readUntilPts(api, ctx, 800, 12000);
-    assert(fwd.ok, `failed to reach forward target: ${JSON.stringify(fwd)}`);
-
-    const burn = readUntilPts(api, ctx, 1100, 32000);
-    assert(burn.ok, `failed burn decode to 1100s: ${JSON.stringify(burn)}`);
-
-    const backSeek = api.seek(ctx, 100);
-    assert(backSeek < 0, `expected backward seek failure after compaction, got ${backSeek}`);
+    assert(
+      seekFwd < 0,
+      `append-stream timestamp seek should be disabled, got ${seekFwd}`
+    );
 
     return {
       duration,
-      forwardPts: fwd.pts,
-      burnPts: burn.pts,
-      backwardSeekRet: backSeek,
-      bufferedAfterBurn: api.bufferedBytes(ctx),
+      appendSeekRet: seekFwd,
+      bufferedAfterOpen: api.bufferedBytes(ctx),
     };
   } finally {
     api.destroy(ctx);

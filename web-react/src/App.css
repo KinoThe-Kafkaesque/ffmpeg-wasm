@@ -49,3 +49,61 @@
   font-size: 0.85rem;
   opacity: 0.75;
 }
+
+.debug-panel {
+  border: 1px solid var(--border, #d9cfc0);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(44, 106, 138, 0.06);
+  display: grid;
+  gap: 12px;
+}
+
+.debug-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.debug-header h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.debug-header label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.debug-header select {
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.debug-item,
+.debug-seeks {
+  min-width: 0;
+  border: 1px solid rgba(44, 106, 138, 0.16);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(255, 248, 238, 0.64);
+}
+
+.debug-item span:last-child,
+.debug-seeks span:last-child {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", monospace;
+  font-size: 0.8rem;
+}

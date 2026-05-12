@@ -29,6 +29,10 @@
 
           <!-- OSD -->
           <div id="osd" class="osd"></div>
+          <div id="sourceOverlay" class="source-overlay">
+            <div id="sourceTitle" class="source-title">Open a media file</div>
+            <div id="sourceMeta" class="source-meta">Local files use random-access IO; Range-capable URLs can seek.</div>
+          </div>
 
           <!-- Top Menu Bar Overlay -->
           <div class="menu-bar-overlay" id="menuBar">
@@ -62,15 +66,7 @@
                   </div>
                 </div>
 
-                <div class="menu-item">
-                    <span class="label">Container Hint</span>
-                    <span class="menu-arrow">›</span>
-                    <div class="menu-dropdown">
-                        <div class="menu-item" data-action="setFormat" data-value="">Auto</div>
-                        <div class="menu-item" data-action="setFormat" data-value="matroska">Matroska / WebM</div>
-                        <div class="menu-item" data-action="setFormat" data-value="mov">MP4 / QuickTime</div>
-                    </div>
-                </div>
+                <div class="menu-item menu-item-static">Container: Auto detect</div>
                 
                 <div class="menu-item">
                     <span class="label">Buffer Size</span>
@@ -306,6 +302,34 @@
                     <span class="stat-label">Audio</span>
                     <span class="stat-value" id="audioInfo">-</span>
                   </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Source</span>
+                    <span class="stat-value" id="sourceInfo">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Container</span>
+                    <span class="stat-value" id="containerInfo">Auto</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Seek</span>
+                    <span class="stat-value" id="seekInfo">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Audio Queue</span>
+                    <span class="stat-value" id="audioQueueInfo">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Audio Drops</span>
+                    <span class="stat-value" id="audioDropInfo">0 / 0</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Tracks</span>
+                    <span class="stat-value" id="trackInfo">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Subtitles</span>
+                    <span class="stat-value" id="subtitleInfo">-</span>
+                  </div>
                 </div>
             </div>
             <div class="panel">
@@ -323,7 +347,7 @@
 
     <!-- Hidden Logic Elements -->
     <div style="display: none;">
-        <input id="fileInput" type="file" accept="video/*,.mkv,video/x-matroska" />
+        <input id="fileInput" type="file" accept="video/*,audio/*,.mkv,.webm,.mp4,.m4v,.mov,.avi,.ts,.mts,.mp3,.flac,.ogg,.opus,.wav" />
         <button id="startBtn">Start</button>
         <button id="pauseBtn">Pause</button>
         <button id="stopBtn">Stop</button>
@@ -336,7 +360,7 @@
             <div class="modal-body">
                 <input type="url" id="urlInput" placeholder="https://example.com/video.mkv" />
                 <p style="font-size: 0.8rem; color: #aaa; margin-bottom: 16px;">
-                    Note: The server must support CORS (Access-Control-Allow-Origin).
+                    CORS is required. URLs with HTTP Range support will use seekable read_at mode.
                 </p>
             </div>
             <div class="modal-footer">

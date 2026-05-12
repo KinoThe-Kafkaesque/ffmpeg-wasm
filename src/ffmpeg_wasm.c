@@ -20,79 +20,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FFMPEG_WASM_IO_APPEND_STREAM 0
-#define FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL 1
-#define FFMPEG_WASM_DEFAULT_CACHE_LIMIT (384 * 1024 * 1024)
-#define FFMPEG_WASM_MIN_READ_WINDOW (8 * 1024 * 1024)
+#include "ffmpeg_wasm_internal.h"
 
-typedef struct StreamBuffer {
-  uint8_t *data;
-  size_t size;
-  size_t capacity;
-  size_t start;
-  size_t read_pos;
-  int64_t offset;
-  size_t limit;
-  int keep_all;
-  int eof;
-  int64_t total_size;  // Known file size, -1 if unknown
-} StreamBuffer;
+#ifndef FFMPEG_WASM_DECODER_THREADS
+#define FFMPEG_WASM_DECODER_THREADS 1
+#endif
 
-typedef struct FFmpegWasmContext {
-  StreamBuffer buffer;
-  int io_mode;
-  size_t cache_limit;
-  uint8_t *ra_cache_data;
-  size_t ra_cache_size;
-  size_t ra_cache_capacity;
-  int64_t ra_cache_start;
-  int64_t ra_pos;
-  AVIOContext *avio;
-  AVFormatContext *fmt;
-  AVPacket *packet;
-
-  AVCodecContext *video_codec;
-  AVCodecContext *audio_codec;
-  AVFrame *video_frame;
-  AVFrame *audio_frame;
-
-  struct SwsContext *sws;
-  uint8_t *rgba_data[4];
-  int rgba_linesize[4];
-  int rgba_size;
-  int rgba_width;
-  int rgba_height;
-  enum AVPixelFormat rgba_src_fmt;
-
-  struct SwrContext *swr;
-  uint8_t *audio_data;
-  int audio_linesize;
-  int audio_nb_samples;
-  int audio_channels;
-  int audio_sample_rate;
-  double audio_pts_seconds;
-
-  int video_stream_index;
-  int audio_stream_index;
-  AVRational video_time_base;
-  AVRational audio_time_base;
-
-  int audio_enabled;
-  int opened;
-  int draining;
-  int video_eof;
-  int audio_eof;
-  int video_flush_sent;
-  int audio_flush_sent;
-
-  ASS_Library *ass_library;
-  ASS_Renderer *ass_renderer;
-  ASS_Track *ass_track;
-  int subtitle_stream_index;
-  AVCodecContext *subtitle_codec;
-  int subtitles_enabled;
-  int attachment_fonts_loaded;
-} FFmpegWasmContext;
+#if FFMPEG_WASM_DECODER_THREADS > 1
+#define FFMPEG_WASM_VIDEO_THREAD_TYPE (FF_THREAD_FRAME | FF_THREAD_SLICE)
+#else
+#define FFMPEG_WASM_VIDEO_THREAD_TYPE 0
+#endif
 
 EM_JS(int, ffmpeg_wasm_read_at_bridge, (double offset, int len, int dst_ptr), {
   if (typeof Module === "undefined" || typeof Module.ffmpegReadAt !== "function") {
@@ -113,6 +51,11 @@ EM_JS(int, ffmpeg_wasm_read_at_bridge, (double offset, int len, int dst_ptr), {
     return -5; // EIO
   }
 });
+
+static int finish_with_last_error(FFmpegWasmContext *ctx, int ret) {
+  ffmpeg_wasm_debug_set_last_error(ctx, ret < 0 ? ret : 0);
+  return ret;
+}
 
 static int ensure_capacity(StreamBuffer *buffer, size_t needed) {
   if (!buffer) {
@@ -692,9 +635,9 @@ static int init_ass_library(FFmpegWasmContext *ctx) {
     return AVERROR(ENOMEM);
   }
 
-  // Use embedded font only (no fontconfig); JS side injects "Inter"
-  ass_set_fonts(ctx->ass_renderer, NULL, "Inter", 0, NULL, 1);
   load_attachment_fonts(ctx);
+  // Use embedded fonts only. JS injects NotoSans-Regular.ttf after the context is created.
+  ass_set_fonts(ctx->ass_renderer, "NotoSans-Regular.ttf", "Noto Sans", 0, NULL, 1);
   return 0;
 }
 
@@ -938,6 +881,38 @@ static int receive_audio_frame(FFmpegWasmContext *ctx) {
   return ret;
 }
 
+static void close_video_decoder(FFmpegWasmContext *ctx) {
+  if (!ctx) {
+    return;
+  }
+  if (ctx->video_codec) {
+    avcodec_free_context(&ctx->video_codec);
+  }
+  if (ctx->sws) {
+    sws_freeContext(ctx->sws);
+    ctx->sws = NULL;
+  }
+  free_rgba_buffers(ctx);
+  ctx->video_stream_index = -1;
+  ctx->video_time_base = (AVRational){0, 1};
+  ctx->video_eof = 1;
+  ctx->video_flush_sent = 1;
+}
+
+static const AVCodec *find_decoder_for_codec_id(enum AVCodecID codec_id) {
+  if (codec_id == AV_CODEC_ID_AV1) {
+    const AVCodec *dav1d = avcodec_find_decoder_by_name("libdav1d");
+    if (dav1d) {
+      return dav1d;
+    }
+  }
+  return avcodec_find_decoder(codec_id);
+}
+
+static int configured_decoder_threads(void) {
+  return FFMPEG_WASM_DECODER_THREADS > 1 ? FFMPEG_WASM_DECODER_THREADS : 1;
+}
+
 static int reopen_video_stream(FFmpegWasmContext *ctx, int stream_index) {
   if (!ctx || !ctx->fmt) {
     return AVERROR(EINVAL);
@@ -954,7 +929,7 @@ static int reopen_video_stream(FFmpegWasmContext *ctx, int stream_index) {
     return AVERROR(EINVAL);
   }
 
-  const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
+  const AVCodec *decoder = find_decoder_for_codec_id(stream->codecpar->codec_id);
   if (!decoder) {
     return AVERROR_DECODER_NOT_FOUND;
   }
@@ -968,8 +943,8 @@ static int reopen_video_stream(FFmpegWasmContext *ctx, int stream_index) {
     avcodec_free_context(&codec);
     return ret;
   }
-  codec->thread_count = 1;
-  codec->thread_type = 0;
+  codec->thread_count = configured_decoder_threads();
+  codec->thread_type = FFMPEG_WASM_VIDEO_THREAD_TYPE;
 
   ret = avcodec_open2(codec, decoder, NULL);
   if (ret < 0) {
@@ -1029,7 +1004,7 @@ static int reopen_audio_stream(FFmpegWasmContext *ctx, int stream_index) {
     return AVERROR(EINVAL);
   }
 
-  const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
+  const AVCodec *decoder = find_decoder_for_codec_id(stream->codecpar->codec_id);
   if (!decoder) {
     return AVERROR_DECODER_NOT_FOUND;
   }
@@ -1083,7 +1058,7 @@ static int reopen_subtitle_stream(FFmpegWasmContext *ctx, int stream_index) {
     return ret;
   }
 
-  const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
+  const AVCodec *decoder = find_decoder_for_codec_id(stream->codecpar->codec_id);
   if (!decoder) {
     return AVERROR_DECODER_NOT_FOUND;
   }
@@ -1170,29 +1145,14 @@ static void process_subtitle_packet(FFmpegWasmContext *ctx, AVPacket *pkt) {
       ass_process_chunk(ctx->ass_track, rect->ass, strlen(rect->ass),
                         (long long)(start_sec * 1000), (long long)(duration_sec * 1000));
 
-      // Emit a debug log back to JS for visibility in the UI log panel
-      EM_ASM_({
-        postMessage({
-          type: "subtitleLog",
-          text: UTF8ToString($0),
-          startMs: $1,
-          endMs: $2
-        });
-      }, rect->ass, (int)start_ms, (int)end_ms);
+      ffmpeg_wasm_debug_post_subtitle_log(rect->ass, (int)start_ms, (int)end_ms);
     } else if (rect->type == SUBTITLE_TEXT && rect->text) {
       char buf[4096];
       snprintf(buf, sizeof(buf), "Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,%s", rect->text);
       ass_process_chunk(ctx->ass_track, buf, strlen(buf),
                         (long long)(start_sec * 1000), (long long)(duration_sec * 1000));
 
-      EM_ASM_({
-        postMessage({
-          type: "subtitleLog",
-          text: UTF8ToString($0),
-          startMs: $1,
-          endMs: $2
-        });
-      }, rect->text, (int)start_ms, (int)end_ms);
+      ffmpeg_wasm_debug_post_subtitle_log(rect->text, (int)start_ms, (int)end_ms);
     }
   }
 
@@ -1213,7 +1173,7 @@ EMSCRIPTEN_KEEPALIVE unsigned int ffmpeg_wasm_avutil_version(void) {
 
 EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_has_hevc_av1(void) {
   const AVCodec *hevc = avcodec_find_decoder(AV_CODEC_ID_HEVC);
-  const AVCodec *av1 = avcodec_find_decoder(AV_CODEC_ID_AV1);
+  const AVCodec *av1 = avcodec_find_decoder_by_name("libdav1d");
   return (hevc != NULL) && (av1 != NULL);
 }
 
@@ -1249,6 +1209,10 @@ EMSCRIPTEN_KEEPALIVE uintptr_t ffmpeg_wasm_create(int initial_capacity) {
   ctx->cache_limit = (size_t)FFMPEG_WASM_DEFAULT_CACHE_LIMIT;
   ctx->ra_cache_start = -1;
   ctx->ra_pos = 0;
+  ctx->last_packet_stream_index = -1;
+  ctx->last_packet_pts_seconds = -1.0;
+  ctx->last_error = 0;
+  ffmpeg_wasm_debug_install_log_bridge();
   av_log_set_level(AV_LOG_ERROR);
   return (uintptr_t)ctx;
 }
@@ -1276,18 +1240,18 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_append(uintptr_t handle, const uint8_t *dat
     return AVERROR(EINVAL);
   }
   if (ctx->io_mode != FFMPEG_WASM_IO_APPEND_STREAM) {
-    return AVERROR(ENOSYS);
+    return finish_with_last_error(ctx, AVERROR(ENOSYS));
   }
   if (!data) {
     av_log(NULL, AV_LOG_ERROR, "append: data is NULL\n");
-    return AVERROR(EINVAL);
+    return finish_with_last_error(ctx, AVERROR(EINVAL));
   }
   if (len < 0) {
     av_log(NULL, AV_LOG_ERROR, "append: len is negative (%d)\n", len);
-    return AVERROR(EINVAL);
+    return finish_with_last_error(ctx, AVERROR(EINVAL));
   }
   if (len == 0) {
-    return 0;
+    return finish_with_last_error(ctx, 0);
   }
 
   size_t needed = ctx->buffer.start + ctx->buffer.size + (size_t)len;
@@ -1295,7 +1259,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_append(uintptr_t handle, const uint8_t *dat
   if (ret < 0) {
     av_log(NULL, AV_LOG_ERROR, "append: ensure_capacity failed (%d), needed=%zu, start=%zu, size=%zu\n",
            ret, needed, ctx->buffer.start, ctx->buffer.size);
-    return ret;
+    return finish_with_last_error(ctx, ret);
   }
 
   memcpy(ctx->buffer.data + ctx->buffer.start + ctx->buffer.size, data, (size_t)len);
@@ -1305,7 +1269,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_append(uintptr_t handle, const uint8_t *dat
     ctx->avio->eof_reached = 0;
     ctx->avio->error = 0;
   }
-  return len;
+  return finish_with_last_error(ctx, len);
 }
 
 EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_set_eof(uintptr_t handle) {
@@ -1440,13 +1404,13 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_open(uintptr_t handle, const char *format_n
     return AVERROR(EINVAL);
   }
   if (ctx->opened) {
-    return 0;
+    return finish_with_last_error(ctx, 0);
   }
 
   ctx->buffer.read_pos = 0;
   if (ctx->io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
     if (ctx->buffer.total_size == 0) {
-      return AVERROR(EINVAL);
+      return finish_with_last_error(ctx, AVERROR(EINVAL));
     }
     ctx->ra_pos = 0;
     ctx->ra_cache_size = 0;
@@ -1457,7 +1421,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_open(uintptr_t handle, const char *format_n
   const int avio_buffer_size = 32 * 1024;
   uint8_t *avio_buffer = av_malloc(avio_buffer_size);
   if (!avio_buffer) {
-    return AVERROR(ENOMEM);
+    return finish_with_last_error(ctx, AVERROR(ENOMEM));
   }
 
   ctx->avio = avio_alloc_context(
@@ -1470,21 +1434,20 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_open(uintptr_t handle, const char *format_n
       seek_stream);
   if (!ctx->avio) {
     av_free(avio_buffer);
-    return AVERROR(ENOMEM);
+    return finish_with_last_error(ctx, AVERROR(ENOMEM));
   }
   if (ctx->io_mode == FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
     ctx->avio->seekable = AVIO_SEEKABLE_NORMAL;
   } else {
-    // Disable seeking during open to prevent FFmpeg from seeking to find
-    // container metadata that isn't buffered yet. We'll enable it later
-    // once the file is opened and we can handle seek failures gracefully.
+    // Append streams are progressive-only. Random access seeking is reserved
+    // for the read_at-backed mode, which can honor arbitrary byte seeks.
     ctx->avio->seekable = 0;
   }
 
   ctx->fmt = avformat_alloc_context();
   if (!ctx->fmt) {
     reset_decoder(ctx);
-    return AVERROR(ENOMEM);
+    return finish_with_last_error(ctx, AVERROR(ENOMEM));
   }
 
   ctx->fmt->pb = ctx->avio;
@@ -1499,68 +1462,43 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_open(uintptr_t handle, const char *format_n
   int ret = avformat_open_input(&ctx->fmt, NULL, input_format, NULL);
   if (ret < 0) {
     reset_decoder(ctx);
-    return ret;
+    return finish_with_last_error(ctx, ret);
   }
 
+  ret = avformat_find_stream_info(ctx->fmt, NULL);
+  if (ret < 0) {
+    reset_decoder(ctx);
+    return finish_with_last_error(ctx, ret);
+  }
+
+  int opened_streams = 0;
   const AVCodec *video_decoder = NULL;
   ret = av_find_best_stream(ctx->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &video_decoder, 0);
-  if (ret < 0 || !video_decoder) {
-    reset_decoder(ctx);
-    return ret < 0 ? ret : AVERROR_DECODER_NOT_FOUND;
-  }
-
-  ctx->video_stream_index = ret;
-  AVStream *video_stream = ctx->fmt->streams[ctx->video_stream_index];
-  ctx->video_time_base = video_stream->time_base;
-
-  ctx->video_codec = avcodec_alloc_context3(video_decoder);
-  if (!ctx->video_codec) {
-    reset_decoder(ctx);
-    return AVERROR(ENOMEM);
-  }
-
-  ret = avcodec_parameters_to_context(ctx->video_codec, video_stream->codecpar);
-  if (ret < 0) {
-    reset_decoder(ctx);
-    return ret;
-  }
-
-  ctx->video_codec->thread_count = 1;
-  ctx->video_codec->thread_type = 0;
-
-  ret = avcodec_open2(ctx->video_codec, video_decoder, NULL);
-  if (ret < 0) {
-    reset_decoder(ctx);
-    return ret;
+  if (ret >= 0 && video_decoder) {
+    ret = reopen_video_stream(ctx, ret);
+    if (ret < 0) {
+      reset_decoder(ctx);
+      return finish_with_last_error(ctx, ret);
+    }
+    opened_streams++;
+  } else {
+    close_video_decoder(ctx);
   }
 
   const AVCodec *audio_decoder = NULL;
   ret = av_find_best_stream(ctx->fmt, AVMEDIA_TYPE_AUDIO, -1, -1, &audio_decoder, 0);
   if (ret >= 0 && audio_decoder) {
-    ctx->audio_stream_index = ret;
-    AVStream *audio_stream = ctx->fmt->streams[ctx->audio_stream_index];
-    ctx->audio_time_base = audio_stream->time_base;
-
-    ctx->audio_codec = avcodec_alloc_context3(audio_decoder);
-    if (!ctx->audio_codec) {
-      reset_decoder(ctx);
-      return AVERROR(ENOMEM);
-    }
-
-    ret = avcodec_parameters_to_context(ctx->audio_codec, audio_stream->codecpar);
+    ret = reopen_audio_stream(ctx, ret);
     if (ret < 0) {
       reset_decoder(ctx);
-      return ret;
+      return finish_with_last_error(ctx, ret);
     }
+    opened_streams++;
+  }
 
-    ctx->audio_codec->thread_count = 1;
-    ctx->audio_codec->thread_type = 0;
-
-    ret = avcodec_open2(ctx->audio_codec, audio_decoder, NULL);
-    if (ret < 0) {
-      reset_decoder(ctx);
-      return ret;
-    }
+  if (opened_streams == 0) {
+    reset_decoder(ctx);
+    return finish_with_last_error(ctx, AVERROR_STREAM_NOT_FOUND);
   }
 
   ctx->packet = av_packet_alloc();
@@ -1568,26 +1506,20 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_open(uintptr_t handle, const char *format_n
   ctx->audio_frame = av_frame_alloc();
   if (!ctx->packet || !ctx->video_frame || !ctx->audio_frame) {
     reset_decoder(ctx);
-    return AVERROR(ENOMEM);
+    return finish_with_last_error(ctx, AVERROR(ENOMEM));
   }
 
   ctx->opened = 1;
   ctx->draining = 0;
-  ctx->video_eof = 0;
-  ctx->audio_eof = 0;
-  ctx->video_flush_sent = 0;
-  ctx->audio_flush_sent = 0;
-
-  // Now that file is opened, enable seeking for playback
-  // seek_stream will return -1 if position is outside buffered range
-  if (ctx->avio && ctx->io_mode == FFMPEG_WASM_IO_APPEND_STREAM) {
-    ctx->avio->seekable = AVIO_SEEKABLE_NORMAL;
-  }
+  ctx->video_eof = ctx->video_codec ? 0 : 1;
+  ctx->audio_eof = ctx->audio_codec ? 0 : 1;
+  ctx->video_flush_sent = ctx->video_codec ? 0 : 1;
+  ctx->audio_flush_sent = ctx->audio_codec ? 0 : 1;
 
   // Allow buffer compaction now that open succeeded
   ctx->buffer.keep_all = 0;
 
-  return 0;
+  return finish_with_last_error(ctx, 0);
 }
 
 EMSCRIPTEN_KEEPALIVE double ffmpeg_wasm_duration_seconds(uintptr_t handle) {
@@ -1621,14 +1553,14 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_seek_seconds(uintptr_t handle, double secon
   if (!ctx || !ctx->fmt || !ctx->opened) {
     return AVERROR(EINVAL);
   }
-
-  double current_seconds = -1.0;
-  if (ctx->video_frame && ctx->video_time_base.den != 0) {
-    int64_t current_pts = ctx->video_frame->best_effort_timestamp;
-    if (current_pts != AV_NOPTS_VALUE) {
-      current_seconds = current_pts * av_q2d(ctx->video_time_base);
-    }
+  if (ctx->io_mode != FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL) {
+    return finish_with_last_error(ctx, AVERROR(ENOSYS));
   }
+  if (ctx->avio) {
+    ctx->avio->seekable = AVIO_SEEKABLE_NORMAL;
+    ctx->avio->eof_reached = 0;
+  }
+  ctx->buffer.eof = 0;
 
   int64_t pos_before = -1;
   if (ctx->avio) {
@@ -1642,23 +1574,20 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_seek_seconds(uintptr_t handle, double secon
   // Allow seeking to a keyframe before or at the target, but not after.
   // This ensures we don't overshoot and end up at a random future position.
   int ret = avformat_seek_file(ctx->fmt, -1, INT64_MIN, target, target, 0);
-  if (ret < 0) {
-    return ret;
-  }
 
   int64_t pos_after = -1;
   if (ctx->avio) {
     pos_after = avio_tell(ctx->avio);
   }
 
-  // Detect false-positive backward seeks where demuxer returns success but
-  // does not move the underlying byte position.
-  if (current_seconds >= 0.0 &&
-      seconds + 1.0 < current_seconds &&
-      pos_before >= 0 &&
-      pos_after >= 0 &&
-      pos_after >= pos_before) {
-    return AVERROR(EIO);
+  if (ret < 0) {
+    if (ret == AVERROR(ESPIPE) || ret == -29) {
+      ret = 0;
+    } else if (pos_before < 0 || pos_after < 0 || pos_after == pos_before) {
+      return finish_with_last_error(ctx, ret);
+    } else {
+      ret = 0;
+    }
   }
 
   avformat_flush(ctx->fmt);
@@ -1675,7 +1604,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_seek_seconds(uintptr_t handle, double secon
   ctx->audio_eof = 0;
   ctx->video_flush_sent = 0;
   ctx->audio_flush_sent = 0;
-  return 0;
+  return finish_with_last_error(ctx, 0);
 }
 
 EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_chapters_count(uintptr_t handle) {
@@ -1739,57 +1668,21 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_seek_chapter(uintptr_t handle, int chapter_
   return ffmpeg_wasm_seek_seconds(handle, start_sec);
 }
 
-// Prepare for re-streaming from a new byte offset.
-// Keeps format context and codecs intact, just flushes buffers and resets stream position.
-// JS should call this, then stream new data from file.slice(new_offset).
+// Deprecated: re-streaming by mutating AVIO internals was fragile. Use
+// FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL and ffmpeg_wasm_seek_seconds instead.
 EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_prepare_restream(uintptr_t handle, double new_byte_offset) {
+  (void)new_byte_offset;
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
   if (!ctx || !ctx->fmt || !ctx->opened) {
     return AVERROR(EINVAL);
   }
-  if (ctx->io_mode != FFMPEG_WASM_IO_APPEND_STREAM) {
-    return AVERROR(ENOSYS);
-  }
-
-  int64_t byte_pos = (int64_t)new_byte_offset;
-
-  // Flush codec buffers
-  if (ctx->video_codec) {
-    avcodec_flush_buffers(ctx->video_codec);
-  }
-  if (ctx->audio_codec) {
-    avcodec_flush_buffers(ctx->audio_codec);
-  }
-
-  // Clear stream buffer but keep it allocated
-  ctx->buffer.start = 0;
-  ctx->buffer.size = 0;
-  ctx->buffer.read_pos = 0;
-  ctx->buffer.eof = 0;
-  ctx->buffer.offset = byte_pos;
-
-  // Reset EOF/draining state
-  ctx->draining = 0;
-  ctx->video_eof = 0;
-  ctx->audio_eof = 0;
-  ctx->video_flush_sent = 0;
-  ctx->audio_flush_sent = 0;
-
-  // Tell FFmpeg's AVIO layer about the new position
-  // This is critical - without this, FFmpeg will try to read from the old position
-  if (ctx->avio) {
-    ctx->avio->pos = byte_pos;
-    // Clear any internal AVIO buffer
-    ctx->avio->buf_ptr = ctx->avio->buffer;
-    ctx->avio->buf_end = ctx->avio->buffer;
-  }
-
-  return 0;
+  return finish_with_last_error(ctx, AVERROR(ENOSYS));
 }
 
 EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_read_frame(uintptr_t handle) {
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
-  if (!ctx || !ctx->opened || !ctx->video_codec || !ctx->fmt) {
+  if (!ctx || !ctx->opened || !ctx->fmt ||
+      (!ctx->video_codec && (!ctx->audio_codec || !ctx->audio_enabled))) {
     return AVERROR(EINVAL);
   }
 
@@ -1797,24 +1690,24 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_read_frame(uintptr_t handle) {
   if (ctx->audio_enabled && ctx->audio_codec) {
     ret = receive_audio_frame(ctx);
     if (ret == 2) {
-      return 2;
+      return finish_with_last_error(ctx, 2);
     }
     if (ret < 0 && ret != AVERROR(EAGAIN)) {
-      return ret;
+      return finish_with_last_error(ctx, ret);
     }
   }
 
   ret = receive_video_frame(ctx);
   if (ret == 1) {
-    return 1;
+    return finish_with_last_error(ctx, 1);
   }
   if (ret < 0 && ret != AVERROR(EAGAIN)) {
-    return ret;
+    return finish_with_last_error(ctx, ret);
   }
 
   if (ctx->draining && (ctx->video_eof || !ctx->video_codec) &&
       (ctx->audio_eof || !ctx->audio_codec || !ctx->audio_enabled)) {
-    return -1;
+    return finish_with_last_error(ctx, -1);
   }
 
   for (;;) {
@@ -1832,10 +1725,26 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_read_frame(uintptr_t handle) {
       continue;
     }
     if (ret == AVERROR(EAGAIN)) {
-      return 0;
+      return finish_with_last_error(ctx, 0);
     }
     if (ret < 0) {
-      return ret;
+      return finish_with_last_error(ctx, ret);
+    }
+
+    ctx->packets_read += 1;
+    ctx->last_packet_stream_index = ctx->packet->stream_index;
+    ctx->last_packet_pts_seconds = -1.0;
+    if (ctx->packet->stream_index >= 0 &&
+        ctx->packet->stream_index < (int)ctx->fmt->nb_streams) {
+      AVStream *packet_stream = ctx->fmt->streams[ctx->packet->stream_index];
+      int64_t packet_pts = ctx->packet->pts;
+      if (packet_pts == AV_NOPTS_VALUE) {
+        packet_pts = ctx->packet->dts;
+      }
+      if (packet_stream && packet_stream->time_base.den != 0 &&
+          packet_pts != AV_NOPTS_VALUE) {
+        ctx->last_packet_pts_seconds = packet_pts * av_q2d(packet_stream->time_base);
+      }
     }
 
     if (ctx->packet->stream_index == ctx->video_stream_index) {
@@ -1844,13 +1753,13 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_read_frame(uintptr_t handle) {
       if (ret == AVERROR(EAGAIN)) {
         ret = receive_video_frame(ctx);
         if (ret == 1) {
-          return 1;
+          return finish_with_last_error(ctx, 1);
         }
         if (ret < 0 && ret != AVERROR(EAGAIN)) {
-          return ret;
+          return finish_with_last_error(ctx, ret);
         }
       } else if (ret < 0) {
-        return ret;
+        return finish_with_last_error(ctx, ret);
       }
     } else if (ctx->packet->stream_index == ctx->audio_stream_index) {
       if (ctx->audio_enabled && ctx->audio_codec) {
@@ -1859,18 +1768,19 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_read_frame(uintptr_t handle) {
         if (ret == AVERROR(EAGAIN)) {
           ret = receive_audio_frame(ctx);
           if (ret == 2) {
-            return 2;
+            return finish_with_last_error(ctx, 2);
           }
           if (ret < 0 && ret != AVERROR(EAGAIN)) {
-            return ret;
+            return finish_with_last_error(ctx, ret);
           }
         } else if (ret < 0) {
-          return ret;
+          return finish_with_last_error(ctx, ret);
         }
       } else {
         av_packet_unref(ctx->packet);
       }
     } else if (ctx->packet->stream_index == ctx->subtitle_stream_index) {
+      ctx->subtitle_packets_read += 1;
       if (ctx->subtitles_enabled && ctx->subtitle_codec) {
         process_subtitle_packet(ctx, ctx->packet);
       }
@@ -1882,24 +1792,24 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_read_frame(uintptr_t handle) {
     if (ctx->audio_enabled && ctx->audio_codec) {
       ret = receive_audio_frame(ctx);
       if (ret == 2) {
-        return 2;
+        return finish_with_last_error(ctx, 2);
       }
       if (ret < 0 && ret != AVERROR(EAGAIN)) {
-        return ret;
+        return finish_with_last_error(ctx, ret);
       }
     }
 
     ret = receive_video_frame(ctx);
     if (ret == 1) {
-      return 1;
+      return finish_with_last_error(ctx, 1);
     }
     if (ret < 0 && ret != AVERROR(EAGAIN)) {
-      return ret;
+      return finish_with_last_error(ctx, ret);
     }
 
     if (ctx->draining && (ctx->video_eof || !ctx->video_codec) &&
         (ctx->audio_eof || !ctx->audio_codec || !ctx->audio_enabled)) {
-      return -1;
+      return finish_with_last_error(ctx, -1);
     }
   }
 }
@@ -2266,17 +2176,21 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_select_streams(uintptr_t handle, int video_
     const AVCodec *decoder = NULL;
     int ret = av_find_best_stream(ctx->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &decoder, 0);
     if (ret < 0) {
+      close_video_decoder(ctx);
+      v_index = -2;
+    } else {
+      v_index = ret;
+    }
+  }
+  if (v_index == -2) {
+    close_video_decoder(ctx);
+  } else if (v_index < 0) {
+    return AVERROR(EINVAL);
+  } else {
+    int ret = reopen_video_stream(ctx, v_index);
+    if (ret < 0) {
       return ret;
     }
-    v_index = ret;
-  }
-  if (v_index < 0) {
-    return AVERROR(EINVAL);
-  }
-
-  int ret = reopen_video_stream(ctx, v_index);
-  if (ret < 0) {
-    return ret;
   }
 
   if (audio_stream_index == -2) {
@@ -2284,7 +2198,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_select_streams(uintptr_t handle, int video_
     ctx->audio_enabled = 0;
     ctx->audio_eof = 1;
     ctx->audio_flush_sent = 1;
-    return 0;
+    return ctx->video_codec ? 0 : AVERROR_STREAM_NOT_FOUND;
   }
 
   int a_index = audio_stream_index;
@@ -2306,10 +2220,10 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_select_streams(uintptr_t handle, int video_
     ctx->audio_enabled = 0;
     ctx->audio_eof = 1;
     ctx->audio_flush_sent = 1;
-    return 0;
+    return ctx->video_codec ? 0 : AVERROR_STREAM_NOT_FOUND;
   }
 
-  ret = reopen_audio_stream(ctx, a_index);
+  int ret = reopen_audio_stream(ctx, a_index);
   if (ret < 0) {
     return ret;
   }
@@ -2356,7 +2270,11 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_add_font(uintptr_t handle, const char *name
   if (!ctx || !ctx->ass_library || !data || len <= 0) {
     return AVERROR(EINVAL);
   }
-  ass_add_font(ctx->ass_library, name, (char *)data, len);
+  const char *font_name = (name && name[0]) ? name : "NotoSans-Regular.ttf";
+  ass_add_font(ctx->ass_library, (char *)font_name, (char *)data, len);
+  if (ctx->ass_renderer) {
+    ass_set_fonts(ctx->ass_renderer, font_name, "Noto Sans", 0, NULL, 1);
+  }
   return 0;
 }
 
@@ -2370,6 +2288,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_render_subtitles(uintptr_t handle, double p
   }
 
   ass_set_frame_size(ctx->ass_renderer, ctx->rgba_width, ctx->rgba_height);
+  ass_set_storage_size(ctx->ass_renderer, ctx->rgba_width, ctx->rgba_height);
 
   int changed = 0;
   ASS_Image *img = ass_render_frame(ctx->ass_renderer, ctx->ass_track,
@@ -2383,15 +2302,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_render_subtitles(uintptr_t handle, double p
       first_start = ev->Start;
       first_end = ev->Start + ev->Duration;
     }
-    EM_ASM_({
-      postMessage({
-        type: "subtitleDebug",
-        note: "render returned null",
-        nEvents: $0,
-        firstStartMs: $1,
-        firstEndMs: $2
-      });
-    }, n, (int)first_start, (int)first_end);
+    ffmpeg_wasm_debug_post_subtitle_render_null(n, (int)first_start, (int)first_end);
     return 0;
   }
 
