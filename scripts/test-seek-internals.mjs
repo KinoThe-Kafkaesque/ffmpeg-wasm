@@ -48,7 +48,7 @@ const buildTestWasm = () => {
   -Lbuild/ffmpeg-wasm/lib \
   -Wl,--start-group \
   -lavformat -lavcodec -lswresample -lswscale -lavutil \
-  -lass -lfreetype -lfribidi \
+  -lass -lfreetype -lfribidi -ldav1d \
   -Wl,--end-group \
   -o "${TEST_JS}"
 `;

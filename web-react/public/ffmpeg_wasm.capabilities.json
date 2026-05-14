@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "packageName": "ffmpeg-wasm",
+  "variant": "full",
+  "buildMode": "release",
+  "generatedAt": "2026-05-13T20:20:22.926Z",
+  "wasm": {
+    "simd": true,
+    "pthreads": true,
+    "decoderThreads": 4,
+    "pthreadPool": 8,
+    "stackSize": "8MB",
+    "safeHeap": false
+  },
+  "io": {
+    "appendStream": true,
+    "localReadAt": true,
+    "httpRangeReadAt": true
+  },
+  "buildProfile": {
+    "purpose": "decode-playback",
+    "ffmpegPrograms": false,
+    "network": false,
+    "encoders": false,
+    "muxers": false,
+    "filters": false,
+    "bitstreamFilters": [
+      "vp9_superframe_split"
+    ],
+    "devices": false,
+    "iconv": false,
+    "runtimeCpuDetect": false
+  },
+  "demuxers": [
+    "avi",
+    "flac",
+    "matroska",
+    "mov",
+    "mp3",
+    "mpegts",
+    "ogg",
+    "wav"
+  ],
+  "protocols": [
+    "file"
+  ],
+  "extensions": [
+    "3g2",
+    "3gp",
+    "avi",
+    "flac",
+    "m2ts",
+    "m4a",
+    "m4v",
+    "mkv",
+    "mov",
+    "mp3",
+    "mp4",
+    "mts",
+    "oga",
+    "ogg",
+    "opus",
+    "ts",
+    "wav",
+    "webm"
+  ],
+  "subtitles": {
+    "ass": true,
+    "ssa": true,
+    "srt": true,
+    "webvtt": true,
+    "bitmapSubtitles": false,
+    "embeddedFonts": true
+  },
+  "licenseProfile": {
+    "gpl": false,
+    "nonfree": false,
+    "patentEncumberedCodecs": true
+  },
+  "codecs": {
+    "video": [
+      "av1",
+      "h263",
+      "h264",
+      "hevc",
+      "mpeg2video",
+      "mpeg4",
+      "vp8",
+      "vp9"
+    ],
+    "audio": [
+      "aac",
+      "ac3",
+      "alac",
+      "eac3",
+      "flac",
+      "mp3",
+      "opus",
+      "pcm_f32le",
+      "pcm_s16be",
+      "pcm_s16le",
+      "pcm_s24le",
+      "pcm_s32le",
+      "pcm_s8",
+      "pcm_u8",
+      "vorbis"
+    ],
+    "subtitle": [
+      "ass",
+      "ssa",
+      "subrip",
+      "webvtt"
+    ]
+  },
+  "browserFallback": {
+    "shouldLiveInConsumerApp": true,
+    "reason": "The WASM release declares support; UI products decide when native browser playback is an acceptable fallback."
+  }
+}

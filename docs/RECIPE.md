@@ -49,7 +49,7 @@ This is a chronological record of the steps taken, plus the reasoning and altern
 - AudioWorklet playback: stable, low-glitch streaming without the deprecated ScriptProcessorNode.
 - Fixed 48 kHz stereo output: simplifies AudioContext configuration for Chromium-only playback.
 - Optional WebGL path: provides a GPU rendering option without forcing extra complexity on the default flow.
-- Keep FFmpeg "normal" (no `--disable-everything`): aligns with the request to keep a full-ish build while ensuring HEVC/AV1 are present.
+- Strict playback-only FFmpeg profile: uses `--disable-everything` plus explicit demuxer/parser/decoder/protocol/BSF allowlists so the WASM artifact does not carry encoders, muxers, filters, devices, or network paths.
 - Vite for React: minimal boilerplate, fast dev loop, straightforward static asset handling via `public/`.
 - License variants: provide a royalty-free build, a patent-encumbered full build, an open-source-required build, a GPL royalty-free build, and a non-redistributable build.
 - dav1d for AV1: keeps AV1 usable in the browser without requiring unavailable hardware acceleration from the WASM module.
@@ -63,7 +63,7 @@ This is a chronological record of the steps taken, plus the reasoning and altern
 - **ScriptProcessorNode for audio**: deprecated and more glitch-prone; AudioWorklet is the modern option.
 - **AudioContext with stream sample rate**: could avoid resampling, but can run into autoplay policies and inconsistent hardware rates.
 - **Fixed wasm heap**: more predictable memory, but fragile for larger streams.
-- **Disabling most FFmpeg components**: smaller wasm size, but contradicts the "normal FFmpeg" requirement.
+- **Separate encode/transcode build**: keeps future export workflows possible without bloating the playback artifact.
 - **Single build only**: simpler, but does not map to the three requested licensing buckets.
 
 ## Commands Used

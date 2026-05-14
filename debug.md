@@ -188,6 +188,28 @@ The worker snapshot adds:
 - `lastError`
 - `lastErrorText`
 - `recentSeeks`
+- `audioClock`
+- `audioDrift`
+- `audioBufferedSeconds`
+- `skippedVideoFrames`
+
+## Audio Sync Architecture
+
+The browser audio path has four layers:
+
+- Seekable local files and HTTP Range URLs use two native FFmpeg contexts in the worker: the main context renders video/subtitles, and a separate audio-only context decodes audio from the same `read_at` source. Append-stream sources keep the single-context path because they cannot safely rewind two demuxers.
+- The worker seeks both native contexts together, throttles the audio context from UI buffer feedback, and falls back to main-context audio if the separate audio decoder fails.
+- The UI thread keeps an audio jitter boundary before the AudioWorklet. It tracks queued PTS, queued end PTS, worklet buffered seconds, trim count, underruns, and the estimated audible media clock.
+- The AudioWorklet owns the real ring buffer. It supports `push`, `clear`, and `trim` messages and reports buffered seconds, dropped samples, trimmed samples, underruns, and capacity.
+
+Clock recovery uses audio as the master when audio exists:
+
+1. The UI estimates audible media time as `lastQueuedEndPts - bufferedSeconds + audioDelay`.
+2. If video is ahead and audio has buffered latency, the UI asks the worklet to trim enough buffered frames to catch up.
+3. The UI posts `audioClock` feedback to the worker about every 200 ms.
+4. If the worker sees a video frame older than the predicted audio clock, it skips rendering that stale frame and continues decoding toward the audible clock.
+
+The debug snapshot exposes `separateAudio`, `audioCtx`, `audioCtxStreamIndex`, and `lastAudioDecodeResult` so native audio-context behavior is visible beside the main decoder state.
 
 ## Debug Panel
 

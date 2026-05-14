@@ -8,7 +8,7 @@
 | S002 | Done | High | Make append-mode seeking progressive-only; local seek now requires `read_at` random-access IO. |
 | S003 | Done | High | Dedupe worker, Node harness, and Emscripten export bindings through `web/ffmpeg-wasm-api.js`. |
 | S004 | Done | High | Add browser debug visibility: debug build mode, `av_log` bridge, native snapshot export, React debug panel, and debug message handlers. |
-| S005 | Later | High | Build variant scrutiny: verify generated FFmpeg config for each variant, decide whether variants are broad or strict, and update codec/licensing docs from generated config truth. |
+| S005 | Done | High | Build variant scrutiny: builds are now strict playback-only profiles; generated FFmpeg config is validated into `ffmpeg-components.json` and fails if encoders, muxers, filters, devices, programs, network, iconv, runtime CPU detection, or unexpected playback components are enabled. |
 | S006 | Later | Medium | App surface cleanup: decide which of `web/app.js`, `app-v2.js`, `app-v3.js`, and `web-react/` remains the product UI; move old surfaces to labs or remove them. |
 | S007 | Done | Medium | Add HTTP Range-backed `read_at` for URLs that support Range requests; keep fetch append mode for non-seekable streams; covered by `scripts/test-http-range-read-at.mjs`. |
 
@@ -19,7 +19,7 @@
 | B001 | Done | MP4 duration/seek is fixed for local files and HTTP Range-capable URLs via `read_at`; non-Range append MP4s remain documented as progressive-only |
 | B002 | Partial | Video state not tracked - React/worker state exists, but should still be centralized before extraction |
 | B003 | Partial | Codec data cleanup improved via destroy/reset path; keep this open until replacement/regression tests cover it |
-| B004 | Done | Choppy-audio pass completed: AudioWorklet startup now flushes queued samples before resume, overflow drops stay channel-aligned, queue/drop/underrun diagnostics are visible, and AAC/MP3/FLAC/OGG plus worklet-buffer regressions cover the fix. |
+| B004 | Done | Choppy-audio pass completed: AudioWorklet startup now flushes queued samples before resume, overflow drops stay channel-aligned, the browser audio boundary has jitter trimming plus clock recovery, the worker receives audio-clock feedback to skip stale video frames, queue/drop/trim/underrun diagnostics are visible, and AAC/MP3/FLAC/OGG plus worklet-buffer regressions cover the fix. |
 | B005 | Done | AV1 `Function not implemented` decode failure fixed by building/linking dav1d, selecting the `libdav1d` software decoder instead of FFmpeg's hardware-accel-only AV1 path, reserving an 8 MB WASM C stack for 10-bit 1080p dav1d decode, and covering it with source-FPS cadence/native real-time checks in `scripts/test-codec-regressions.mjs`. |
 | B006 | Done | 4K AV1 WebM playback now has a native pthread WASM path. The single-threaded SIMD build remains below real-time, but `FFMPEG_WASM_THREADS=4` builds `build/ffmpeg-wasm-pthreads4/` with 4 decoder threads and an 8-worker browser pthread pool. `scripts/test-playback-performance.mjs` passes on `Terence Tao – How the world’s top mathematician uses AI [Q8Fkpi18QXU].webm` at 3840x2160 AV1 / 23.976 fps with ~44.4 fps decode-only and ~43.7 fps decode+RGBA throughput; headed `web/v3.html` smoke decoded the same file at 3840x2160 with audio enabled. |
 
@@ -31,8 +31,8 @@
 | F002 | Done | High | **Better player controls** - `web/v3.html` has seek/time/fullscreen/volume/speed/keyboard controls for the requested scope |
 | F003 | Done | High | **Subtitles support** - ASS/SSA parsing/rendering, font injection, v3 subtitle track UI/debug state, and generated fixture regression coverage are in |
 | F004 | Done | Medium | **Multi-track support** - v3 stream enumeration/track menus and audio/subtitle selection are wired with regression coverage |
-| F005 | Open | Medium | **Extract to kinoplayer** - Move player into standalone project |
-| F006 | Open | High | **Playlist support** - Queue multiple files, video cycling, next/prev controls |
+| F005 | Partial | Medium | **Extract to Parallax** - `../parallax` now exists as a private derivative static app from `web/v3.html`, consuming ffmpeg-wasm release artifacts through its build step; remaining work is deciding what to do with old demo surfaces |
+| F006 | Done | High | **Playlist support** - Implemented in `../parallax` with file/URL queueing, next/prev controls, remove/clear, and auto-advance |
 | F007 | Done | Medium | **Audio file playback** - v3 accepts audio files, uses audio-only timing/placeholder behavior, and covers MP3/FLAC/OGG in regression tests |
 | F008 | Done | Medium | **Enhanced video canvas UI** - v3 loading, error, source, seek, track, subtitle, and audio diagnostics are visible around the canvas |
 
@@ -128,7 +128,7 @@ Some detailed sections below are historical notes. The summary tables above are 
 
 ---
 
-### F005: Extract to kinoplayer
+### F005: Extract to Parallax
 
 **Scope:** Move player UI into a standalone project
 
@@ -140,7 +140,7 @@ kinoSoft/
 │   ├── scripts/
 │   ├── build/
 │   └── docs/
-└── kinoplayer/       # New project - Player UI
+└── parallax/         # Private player UI project
     ├── src/
     │   ├── player.js
     │   ├── controls.js
@@ -154,12 +154,16 @@ kinoSoft/
 ```
 
 **Migration steps:**
-- [ ] Create kinoplayer repository
-- [ ] Move `web-react/` contents to kinoplayer
+- [x] Create private Parallax repository
+- [x] Create derivative `../parallax` project from `web/v3.html`
+- [x] Add release-asset sync script that consumes this repo's built `ffmpeg_wasm.*` artifacts
+- [x] Add build step that syncs the current pthread WASM release into Parallax
+- [x] Add capability-manifest based fallback policy in Parallax
+- [ ] Move or retire `web-react/` contents
 - [ ] Refactor player into reusable component
 - [ ] Publish as npm package (optional)
 - [ ] Update ffmpeg project to only build WASM, not demos
-- [ ] Document integration in kinoplayer README
+- [x] Document integration in Parallax README
 
 ---
 
@@ -193,9 +197,10 @@ kinoSoft/
 - [x] Keep a larger pending audio queue before AudioWorklet initialization completes
 - [x] Flush pending audio into the Worklet before resuming the AudioContext to avoid startup underruns
 - [x] Keep AudioWorklet overflow drops channel-aligned
-- [ ] Use separate decode loop for audio (Web Worker)
-- [ ] Implement audio/video sync with clock recovery
-- [ ] Add jitter buffer to smooth out variable decode times
+- [x] Keep demux/decode in the worker but split the browser audio boundary into explicit queueing, jitter trimming, and feedback messages
+- [x] Use a separate native FFmpeg audio context for seekable `read_at` sources, with append-stream sources retaining the single-context path
+- [x] Implement audio/video sync with clock recovery
+- [x] Add jitter buffer to smooth out variable decode times
 
 ---
 
@@ -240,11 +245,11 @@ kinoSoft/
 **Scope:** Queue multiple files and cycle through them
 
 **Implementation:**
-- [ ] Playlist data structure (array of file references)
-- [ ] Add files to queue (drag-drop, file picker, URLs)
-- [ ] Playlist UI panel (show queue, reorder, remove)
-- [ ] Next/Previous controls
-- [ ] Auto-advance to next video on completion
+- [x] Playlist data structure (array of file references)
+- [x] Add files to queue (drag-drop, file picker, URLs)
+- [x] Playlist UI panel (show queue, remove, clear)
+- [x] Next/Previous controls
+- [x] Auto-advance to next video on completion
 - [ ] Loop modes: none, single, all
 - [ ] Shuffle mode
 - [ ] Persist playlist in localStorage (optional)

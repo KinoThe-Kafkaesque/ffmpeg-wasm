@@ -3,14 +3,104 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>FFmpeg WASM Player v3</title>
+    <title>FFmpeg WASM MKV Player v3 | Browser Video Playback</title>
+    <meta
+      name="description"
+      content="FFmpeg WASM Player v3 is a browser MKV, MP4, WebM, AVI, TS, MP3, FLAC, and Ogg playback demo for local files and direct streams."
+    />
+    <meta
+      name="keywords"
+      content="MKV player, browser MKV player, FFmpeg WASM, WebAssembly video player, Matroska player, local video player"
+    />
+    <meta name="author" content="Nyanpassu" />
+    <meta name="application-name" content="FFmpeg WASM Player v3" />
+    <meta name="generator" content="FFmpeg WASM Player v3" />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="googlebot" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="canonical" href="https://parallax.kinosoft.moe/" />
+    <link rel="me" href="https://ko-fi.com/nyanpassu" />
+    <link rel="help" href="https://github.com/KinoThe-Kafkaesque/ffmpeg-wasm/issues" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#121212" />
+    <meta name="msapplication-TileColor" content="#121212" />
+    <meta name="msapplication-TileImage" content="/mstile-150x150.png" />
+    <meta name="apple-mobile-web-app-title" content="FFmpeg WASM Player" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="format-detection" content="telephone=no" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://parallax.kinosoft.moe/" />
+    <meta property="og:site_name" content="Parallax" />
+    <meta property="og:title" content="Browser MKV Player powered by FFmpeg WASM" />
+    <meta
+      property="og:description"
+      content="Play local MKV files and direct media streams in the browser with FFmpeg WASM, subtitles, multi-track audio, and debug visibility."
+    />
+    <meta property="og:image" content="https://parallax.kinosoft.moe/og-image-20260513.png" />
+    <meta property="og:image:url" content="https://parallax.kinosoft.moe/og-image-20260513.png" />
+    <meta property="og:image:secure_url" content="https://parallax.kinosoft.moe/og-image-20260513.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Browser MKV player with a dark FFmpeg WASM playback interface." />
+    <meta property="og:locale" content="en_US" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:domain" content="parallax.kinosoft.moe" />
+    <meta name="twitter:url" content="https://parallax.kinosoft.moe/" />
+    <meta name="twitter:title" content="Browser MKV Player powered by FFmpeg WASM" />
+    <meta
+      name="twitter:description"
+      content="Private local MKV and direct stream playback in the browser with FFmpeg WASM."
+    />
+    <meta name="twitter:image" content="https://parallax.kinosoft.moe/og-image-20260513.png" />
+    <meta name="twitter:image:alt" content="Browser MKV player with a dark FFmpeg WASM playback interface." />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "FFmpeg WASM MKV Player v3",
+        "alternateName": "Parallax",
+        "url": "https://parallax.kinosoft.moe/",
+        "image": "https://parallax.kinosoft.moe/og-image-20260513.png",
+        "applicationCategory": "MultimediaApplication",
+        "operatingSystem": "Any modern browser",
+        "description": "A browser playback demo for local MKV files, direct media streams, subtitles, audio tracks, and FFmpeg WASM decoding.",
+        "creator": {
+          "@type": "Person",
+          "name": "Nyanpassu",
+          "url": "https://ko-fi.com/nyanpassu"
+        },
+        "sameAs": [
+          "https://github.com/KinoThe-Kafkaesque/ffmpeg-wasm",
+          "https://ko-fi.com/nyanpassu"
+        ],
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "featureList": [
+          "Local MKV and Matroska playback",
+          "Direct stream URL playback when CORS allows it",
+          "FFmpeg WASM decoding",
+          "Subtitle and multi-track audio controls",
+          "Browser fallback for supported media"
+        ]
+      }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles-v3.css" />
+    <link rel="stylesheet" href="styles-v3.css?v=20260513-seo" />
   </head>
   <body>
     <div class="app-container">
@@ -30,8 +120,26 @@
           <!-- OSD -->
           <div id="osd" class="osd"></div>
           <div id="sourceOverlay" class="source-overlay">
-            <div id="sourceTitle" class="source-title">Open a media file</div>
-            <div id="sourceMeta" class="source-meta">Local files use random-access IO; Range-capable URLs can seek.</div>
+            <div id="sourceTitle" class="source-title">Open a video or stream URL</div>
+            <div id="sourceMeta" class="source-meta">Drop media here, upload a file, or paste a direct video URL.</div>
+            <div id="sourceLauncher" class="source-launcher" aria-label="Media source launcher">
+              <div class="source-actions">
+                <button id="sourceFileBtn" class="source-file-button" type="button">Open file</button>
+                <span class="source-drop-copy">or drop a video/audio file here</span>
+              </div>
+              <form id="sourceUrlForm" class="source-url-form">
+                <input
+                  id="sourceUrlInput"
+                  type="url"
+                  inputmode="url"
+                  autocomplete="url"
+                  placeholder="https://example.com/video.mkv"
+                  aria-label="Video stream URL"
+                />
+                <button id="sourceUrlLoadBtn" type="submit">Play URL</button>
+              </form>
+              <div class="source-format-list">MP4, MKV, WebM, AVI, TS, MP3, FLAC, Ogg</div>
+            </div>
           </div>
 
           <!-- Top Menu Bar Overlay -->
@@ -323,6 +431,10 @@
                     <span class="stat-value" id="audioDropInfo">0 / 0</span>
                   </div>
                   <div class="stat-item">
+                    <span class="stat-label">Audio Decode</span>
+                    <span class="stat-value" id="audioDecodeInfo">-</span>
+                  </div>
+                  <div class="stat-item">
                     <span class="stat-label">Tracks</span>
                     <span class="stat-value" id="trackInfo">-</span>
                   </div>
@@ -343,6 +455,14 @@
             </div>
         </div>
       </main>
+
+      <footer class="site-footer" aria-label="Project support">
+        <span>Experimental browser media playback by Nyanpassu.</span>
+        <span class="footer-links">
+          <a href="https://github.com/KinoThe-Kafkaesque/ffmpeg-wasm/issues" target="_blank" rel="noopener noreferrer">Report issues</a>
+          <a href="https://ko-fi.com/nyanpassu" target="_blank" rel="noopener noreferrer me">Support on Ko-fi</a>
+        </span>
+      </footer>
     </div>
 
     <!-- Hidden Logic Elements -->
@@ -396,6 +516,6 @@
         </div>
     </div>
 
-    <script type="module" src="app-v3.js"></script>
+    <script type="module" src="app-v3.js?v=20260513-seo"></script>
   </body>
 </html>

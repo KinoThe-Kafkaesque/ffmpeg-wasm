@@ -1,0 +1,38 @@
+{
+  "name": "Parallax MKV Player",
+  "short_name": "Parallax",
+  "description": "Private browser MKV, MP4, WebM, AVI, TS, MP3, FLAC, and Ogg playback powered by FFmpeg WASM.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0B0C0F",
+  "theme_color": "#0B0C0F",
+  "orientation": "any",
+  "categories": ["entertainment", "multimedia", "utilities"],
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "64x64",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

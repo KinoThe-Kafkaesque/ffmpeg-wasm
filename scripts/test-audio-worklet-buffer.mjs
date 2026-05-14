@@ -63,4 +63,17 @@ const underrunBefore = processor.underrunFrames;
 processor.process([], [[new Float32Array(128), new Float32Array(128)]]);
 assert(processor.underrunFrames === underrunBefore + 128, "underrun frames were not counted");
 
+processor.resetBuffer();
+processor.pushSamples(new Float32Array(processor.channels * 12));
+const trimmed = processor.trimFrames(5);
+assert(trimmed === processor.channels * 5, "trimFrames returned unexpected sample count");
+assert(processor.available === processor.channels * 7, "trimFrames did not drop the requested frames");
+assert(processor.trimmedSamples === processor.channels * 5, "trimmed samples were not counted");
+
+processor.reportCounter = 19;
+processor.process([], [[new Float32Array(1), new Float32Array(1)]]);
+const status = processor.port.messages.at(-1);
+assert(status?.trimmedSamples === processor.trimmedSamples, "status did not expose trimmed samples");
+assert(status?.capacityFrames === processor.capacityFrames, "status did not expose capacity frames");
+
 console.log("AUDIO WORKLET BUFFER PASS");

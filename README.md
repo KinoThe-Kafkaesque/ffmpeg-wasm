@@ -2,7 +2,9 @@
 
 Goal: build FFmpeg to WebAssembly for HEVC/AV1 playback in Chromium.
 
-Status: buildable. Includes a custom AVIO decode API for streaming, a software AV1 path through dav1d, SIMD release builds, and an optional pthread WASM build for high-resolution AV1 playback. Release builds reserve an 8 MB C stack so decoder-heavy AV1 paths do not overflow the default WASM stack.
+Support development: [Ko-fi](https://ko-fi.com/nyanpassu)
+
+Status: buildable. Includes a custom AVIO decode API for streaming, a software AV1 path through dav1d, SIMD release builds, and an optional pthread WASM build for high-resolution AV1 playback. Release builds reserve an 8 MB C stack so decoder-heavy AV1 paths do not overflow the default WASM stack. FFmpeg is configured as a playback-only build: no CLI programs, network, devices, filters, encoders, muxers, iconv, or runtime CPU detection; the only enabled bitstream filter is the VP9 superframe splitter needed for WebM/Matroska playback.
 
 ## Project layout
 - `scripts/` build tooling
@@ -19,11 +21,14 @@ Status: buildable. Includes a custom AVIO decode API for streaming, a software A
 5. For browser diagnostics: `./scripts/build-ffmpeg.sh --debug` then `./scripts/prepare-demo-assets.sh --debug`
 
 ## Build variants (license + patent risk)
-- `royaltyfree` / `royaltyfree-lgpl`: AV1 via dav1d, VP9, and Opus only, LGPL-friendly, avoids patent-encumbered codecs. Output: `build/ffmpeg-wasm-royaltyfree/`.
+- `royaltyfree` / `royaltyfree-lgpl`: AV1 via dav1d, VP9/VP8, Opus/Vorbis/FLAC, and other royalty-free playback codecs. LGPL-friendly, avoids patent-encumbered codecs. Output: `build/ffmpeg-wasm-royaltyfree/`.
 - `full` (default): HEVC + AV1 via dav1d with common extras, LGPL-friendly but patent-encumbered. Output: `build/ffmpeg-wasm/`.
 - `gpl`: HEVC + AV1 via dav1d with common extras, GPL build (open-source required), patent-encumbered. Output: `build/ffmpeg-wasm-gpl/`.
 - `gpl-royaltyfree` / `royaltyfree-gpl`: royalty-free codec set with GPL obligations. Output: `build/ffmpeg-wasm-gpl-royaltyfree/`.
 - `nonfree`: non-redistributable build. Unsafe to ship publicly or monetize. Output: `build/ffmpeg-wasm-nonfree/`.
+
+Each build emits `ffmpeg-components.json` and fails if generated FFmpeg config
+contains unexpected playback components or any encoder/muxer support.
 
 Build commands:
 - `./scripts/build-ffmpeg.sh --variant royaltyfree` (or `royaltyfree-lgpl`)

@@ -10,7 +10,9 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
     this.available = 0;
     this.reportCounter = 0;
     this.droppedSamples = 0;
+    this.trimmedSamples = 0;
     this.underrunFrames = 0;
+    this.held = false;
 
     this.port.onmessage = (event) => {
       const data = event.data;
@@ -25,6 +27,10 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
         this.pushSamples(samples);
       } else if (data.type === "clear") {
         this.resetBuffer();
+      } else if (data.type === "hold") {
+        this.held = Boolean(data.enabled);
+      } else if (data.type === "trim") {
+        this.trimFrames(data.frames);
       }
     };
   }
@@ -41,6 +47,7 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
     this.writeIndex = 0;
     this.available = 0;
     this.droppedSamples = 0;
+    this.trimmedSamples = 0;
     this.underrunFrames = 0;
   }
 
@@ -48,6 +55,25 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
     this.readIndex = 0;
     this.writeIndex = 0;
     this.available = 0;
+  }
+
+  trimFrames(frames) {
+    const requestedFrames = Math.max(0, Math.floor(Number(frames) || 0));
+    if (requestedFrames <= 0 || this.available <= 0) {
+      return 0;
+    }
+    const requestedSamples = requestedFrames * this.channels;
+    const drop = Math.min(
+      this.available,
+      Math.floor(requestedSamples / this.channels) * this.channels,
+    );
+    if (drop <= 0) {
+      return 0;
+    }
+    this.readIndex = (this.readIndex + drop) % this.capacity;
+    this.available -= drop;
+    this.trimmedSamples += drop;
+    return drop;
   }
 
   pushSamples(samples) {
@@ -98,22 +124,24 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
     }
 
     let missingFrames = 0;
-    for (let i = 0; i < frames; i += 1) {
-      let frameHadData = true;
-      for (let ch = 0; ch < this.channels; ch += 1) {
-        let sample = 0;
-        if (this.available > 0) {
-          sample = this.buffer[this.readIndex];
-          this.readIndex = (this.readIndex + 1) % this.capacity;
-          this.available -= 1;
-        } else {
-          frameHadData = false;
+    if (!this.held) {
+      for (let i = 0; i < frames; i += 1) {
+        let frameHadData = true;
+        for (let ch = 0; ch < this.channels; ch += 1) {
+          let sample = 0;
+          if (this.available > 0) {
+            sample = this.buffer[this.readIndex];
+            this.readIndex = (this.readIndex + 1) % this.capacity;
+            this.available -= 1;
+          } else {
+            frameHadData = false;
+          }
+          if (ch < output.length) {
+            output[ch][i] = sample;
+          }
         }
-        if (ch < output.length) {
-          output[ch][i] = sample;
-        }
+        if (!frameHadData) missingFrames += 1;
       }
-      if (!frameHadData) missingFrames += 1;
     }
 
     if (missingFrames > 0) {
@@ -129,9 +157,12 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
         availableFrames: Math.floor(this.available / this.channels),
         bufferedSeconds: this.available / this.channels / sampleRate,
         droppedSamples: this.droppedSamples,
+        trimmedSamples: this.trimmedSamples,
         underrunFrames: this.underrunFrames,
         channels: this.channels,
         sampleRate,
+        capacityFrames: this.capacityFrames,
+        held: this.held,
       });
     }
     return true;

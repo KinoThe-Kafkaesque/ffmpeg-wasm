@@ -1,6 +1,16 @@
+const APP_ASSET_VERSION = "20260513-seek-preroll";
+const versionedAssetUrl = (path) => {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}v=${encodeURIComponent(APP_ASSET_VERSION)}`;
+};
+
 const statusEl = document.getElementById("status");
 const fileInput = document.getElementById("fileInput");
 const urlInput = document.getElementById("urlInput");
+const sourceLauncher = document.getElementById("sourceLauncher");
+const sourceFileBtn = document.getElementById("sourceFileBtn");
+const sourceUrlForm = document.getElementById("sourceUrlForm");
+const sourceUrlInput = document.getElementById("sourceUrlInput");
 // const formatSelect = document.getElementById("formatSelect"); // Removed in v3
 // const renderModeSelect = document.getElementById("renderMode"); // Removed in v3
 const bufferSizeInput = document.getElementById("bufferSizeInput"); // ID changed or kept
@@ -17,8 +27,8 @@ const timeTotalEl = document.getElementById("timeTotal");
 const overlayMute = document.getElementById("overlayMute");
 const overlayVolume = document.getElementById("overlayVolume");
 const overlayFullscreen = document.getElementById("overlayFullscreen");
-const canvas2d = document.getElementById("canvas2d");
-const canvasGl = document.getElementById("canvasGl");
+let canvas2d = document.getElementById("canvas2d");
+let canvasGl = document.getElementById("canvasGl");
 const canvasWrap = document.getElementById("canvasWrap");
 const playerEl = document.getElementById("player");
 const logEl = document.getElementById("log");
@@ -37,6 +47,7 @@ const containerInfoEl = document.getElementById("containerInfo");
 const seekInfoEl = document.getElementById("seekInfo");
 const audioQueueInfoEl = document.getElementById("audioQueueInfo");
 const audioDropInfoEl = document.getElementById("audioDropInfo");
+const audioDecodeInfoEl = document.getElementById("audioDecodeInfo");
 const trackInfoEl = document.getElementById("trackInfo");
 const subtitleInfoEl = document.getElementById("subtitleInfo");
 
@@ -74,6 +85,13 @@ const shortcutsBtn = document.getElementById("shortcutsBtn");
 
 const DEFAULT_AUDIO_RATE = 48000;
 const MAX_PENDING_AUDIO_BUFFERS = 96;
+const AUDIO_TARGET_BUFFER_SECONDS = 0.45;
+const AUDIO_MAX_BUFFER_SECONDS = 1.4;
+const AUDIO_MIN_BUFFER_AFTER_TRIM_SECONDS = 0.08;
+const AUDIO_LAG_CORRECTION_SECONDS = 0.3;
+const AUDIO_SYNC_POST_INTERVAL_MS = 200;
+const AUDIO_SEEK_PREROLL_SECONDS = 0.12;
+const STOP_ACK_TIMEOUT_MS = 1500;
 const PLAYBACK_SPEEDS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 const MEDIA_TYPE_VIDEO = 0;
 const MEDIA_TYPE_AUDIO = 1;
@@ -108,9 +126,21 @@ const FORMAT_LABELS = {
   wav: "WAV",
 };
 
+const createDefaultSourceState = () => ({
+  kind: "",
+  name: "",
+  formatHint: "",
+  formatSource: "auto",
+  ioMode: "",
+  range: false,
+  seekable: false,
+  size: 0,
+});
+
 const state = {
   worker: null,
   ready: false,
+  workerNeedsRestart: false,
   started: false,
   playing: false,
   scrubbing: false,
@@ -119,16 +149,7 @@ const state = {
   seekHint: "",
   renderMode: "2d",
   formatHint: "",
-  source: {
-    kind: "",
-    name: "",
-    formatHint: "",
-    formatSource: "auto",
-    ioMode: "",
-    range: false,
-    seekable: false,
-    size: 0,
-  },
+  source: createDefaultSourceState(),
   media: {
     hasVideo: false,
     hasAudio: false,
@@ -156,7 +177,20 @@ const state = {
     bufferedSeconds: 0,
     availableFrames: 0,
     droppedSamples: 0,
+    trimmedSamples: 0,
     underrunFrames: 0,
+    capacityFrames: 0,
+    statusReady: false,
+    lastQueuedPts: null,
+    lastQueuedEndPts: null,
+    clock: null,
+    drift: null,
+    corrections: 0,
+    lastSyncPost: 0,
+    holding: false,
+    seekVideoSettled: false,
+    seekVideoSettledAt: 0,
+    heldBufferedSeconds: 0,
     pending: [],
     warned: false,
   },
@@ -184,6 +218,7 @@ const state = {
   chapters: [],
   hasOrderedChapters: false,
   attachments: [],
+  workerDebug: null,
 };
 
 const loadTrackPrefs = () => {
@@ -474,7 +509,7 @@ const jumpToChapter = (chapter) => {
   }
   const target = Number(chapter.start);
   const fallbackSeconds = Number.isFinite(target) && target >= 0 ? target : null;
-  clearAudioQueue();
+  clearAudioQueue({ hold: true });
   if (fallbackSeconds !== null) {
     state.pts = fallbackSeconds;
     updateTimeline(fallbackSeconds);
@@ -600,7 +635,7 @@ const updateSourceOverlay = () => {
   );
   if (sourceTitleEl) {
     if (!hasName) {
-      sourceTitleEl.textContent = "Open a media file";
+      sourceTitleEl.textContent = "Open a video or stream URL";
     } else if (state.media.hasAudio && !state.media.hasVideo) {
       sourceTitleEl.textContent = "Audio playback";
     } else {
@@ -608,6 +643,10 @@ const updateSourceOverlay = () => {
     }
   }
   if (sourceMetaEl) {
+    if (!hasName) {
+      sourceMetaEl.textContent = "Drop media here, upload a file, or paste a direct video URL.";
+      return;
+    }
     const parts = [];
     if (state.source.formatHint) {
       parts.push(`${formatLabel(state.source.formatHint)} from ${state.source.formatSource || "auto"}`);
@@ -653,10 +692,30 @@ const updateDiagnostics = () => {
       ? `${state.audio.bufferedSeconds.toFixed(2)}s`
       : "-";
     const pending = state.audio.pending.length;
-    audioQueueInfoEl.textContent = `${buffered} · ${pending} pending`;
+    const drift = Number.isFinite(state.audio.drift)
+      ? ` · drift ${state.audio.drift.toFixed(2)}s`
+      : "";
+    audioQueueInfoEl.textContent = `${buffered} · ${pending} pending${drift}`;
   }
   if (audioDropInfoEl) {
-    audioDropInfoEl.textContent = `${state.audio.droppedSamples || 0} / ${state.audio.underrunFrames || 0}`;
+    audioDropInfoEl.textContent =
+      `drop ${state.audio.droppedSamples || 0} · trim ${state.audio.trimmedSamples || 0} · under ${state.audio.underrunFrames || 0}`;
+  }
+  if (audioDecodeInfoEl) {
+    const worker = state.workerDebug || {};
+    if (worker.separateAudio) {
+      const stream = Number.isFinite(worker.audioCtxStreamIndex)
+        ? `#${worker.audioCtxStreamIndex}`
+        : "auto";
+      const ret = Number.isFinite(worker.lastAudioDecodeResult)
+        ? ` · ret ${worker.lastAudioDecodeResult}`
+        : "";
+      audioDecodeInfoEl.textContent = `native ctx ${stream}${ret}`;
+    } else {
+      audioDecodeInfoEl.textContent = state.media.hasAudio
+        ? "main ctx"
+        : "-";
+    }
   }
   if (trackInfoEl) {
     trackInfoEl.textContent = `${state.media.videoCount}V ${state.media.audioCount}A ${state.media.subtitleCount}S`;
@@ -890,7 +949,20 @@ const resetAudioState = () => {
     bufferedSeconds: 0,
     availableFrames: 0,
     droppedSamples: 0,
+    trimmedSamples: 0,
     underrunFrames: 0,
+    capacityFrames: 0,
+    statusReady: false,
+    lastQueuedPts: null,
+    lastQueuedEndPts: null,
+    clock: null,
+    drift: null,
+    corrections: 0,
+    lastSyncPost: 0,
+    holding: false,
+    seekVideoSettled: false,
+    seekVideoSettledAt: 0,
+    heldBufferedSeconds: 0,
     pending: [],
     warned: false,
   };
@@ -922,8 +994,16 @@ const setMuted = (muted) => {
 };
 
 const getAudioClock = () => {
+  if (state.audio.holding) return null;
+  if (
+    Number.isFinite(state.audio.lastQueuedEndPts) &&
+    Number.isFinite(state.audio.bufferedSeconds) &&
+    state.audio.statusReady
+  ) {
+    return state.audio.lastQueuedEndPts - state.audio.bufferedSeconds + state.audioDelay;
+  }
   if (!state.audio.context || state.audio.basePts === null) return null;
-  return state.audio.context.currentTime - state.audio.startTime;
+  return state.audio.context.currentTime - state.audio.startTime + state.audioDelay;
 };
 
 const updateAudioDisplay = () => {
@@ -953,14 +1033,168 @@ const syncAudioClock = () => {
   }
 };
 
+const audioFrameDuration = (buffer, sampleRate, channels) => {
+  if (!(buffer instanceof ArrayBuffer) || !sampleRate || !channels) return 0;
+  return buffer.byteLength / Float32Array.BYTES_PER_ELEMENT / channels / sampleRate;
+};
+
+const postAudioSync = (force = false) => {
+  const clock = getAudioClock();
+  state.audio.clock = Number.isFinite(clock) ? clock : null;
+  if (!state.worker) return;
+  const now = performance.now();
+  if (!Number.isFinite(clock)) {
+    if (!force) return;
+    state.audio.lastSyncPost = now;
+    state.worker.postMessage({
+      type: "audioClock",
+      clock: null,
+      drift: null,
+      bufferedSeconds: 0,
+    });
+    return;
+  }
+  if (!force && now - state.audio.lastSyncPost < AUDIO_SYNC_POST_INTERVAL_MS) {
+    return;
+  }
+  state.audio.lastSyncPost = now;
+  state.worker.postMessage({
+    type: "audioClock",
+    clock,
+    drift: Number.isFinite(state.audio.drift) ? state.audio.drift : null,
+    bufferedSeconds: Number.isFinite(state.audio.bufferedSeconds)
+      ? state.audio.bufferedSeconds
+      : null,
+  });
+};
+
+const trimAudioBuffer = (seconds) => {
+  if (!state.audio.worklet || !state.audio.sampleRate || state.audio.holding) return;
+  const frames = Math.max(0, Math.floor(seconds * state.audio.sampleRate));
+  if (frames <= 0) return;
+  state.audio.worklet.port.postMessage({ type: "trim", frames });
+  state.audio.corrections += 1;
+};
+
+const recoverAudioClock = () => {
+  if (state.audio.holding) {
+    state.audio.clock = null;
+    state.audio.drift = null;
+    postAudioSync(true);
+    return;
+  }
+  const clock = getAudioClock();
+  if (!Number.isFinite(clock)) {
+    postAudioSync();
+    return;
+  }
+
+  state.audio.clock = clock;
+  state.audio.drift = Number.isFinite(state.pts) ? state.pts - clock : null;
+  const buffered = Number.isFinite(state.audio.bufferedSeconds)
+    ? state.audio.bufferedSeconds
+    : 0;
+
+  const inPostSeekGrace =
+    state.audio.seekVideoSettledAt > 0 &&
+    performance.now() - state.audio.seekVideoSettledAt < 5000;
+
+  if (
+    !inPostSeekGrace &&
+    state.media.hasVideo &&
+    state.playing &&
+    Number.isFinite(state.audio.drift)
+  ) {
+    if (
+      state.audio.drift > AUDIO_LAG_CORRECTION_SECONDS &&
+      buffered > AUDIO_MIN_BUFFER_AFTER_TRIM_SECONDS
+    ) {
+      const trimSeconds = Math.min(
+        state.audio.drift - AUDIO_MIN_BUFFER_AFTER_TRIM_SECONDS,
+        buffered - AUDIO_MIN_BUFFER_AFTER_TRIM_SECONDS,
+      );
+      if (trimSeconds > 0.02) {
+        trimAudioBuffer(trimSeconds);
+      }
+    } else if (buffered > AUDIO_MAX_BUFFER_SECONDS) {
+      trimAudioBuffer(buffered - AUDIO_TARGET_BUFFER_SECONDS);
+    }
+  }
+
+  postAudioSync();
+};
+
+const setAudioHold = (enabled) => {
+  const hold = Boolean(enabled);
+  state.audio.holding = hold;
+  if (state.audio.worklet) {
+    state.audio.worklet.port.postMessage({ type: "hold", enabled: hold });
+  }
+  if (hold) {
+    state.audio.seekVideoSettled = false;
+    state.audio.seekVideoSettledAt = 0;
+    state.audio.heldBufferedSeconds = 0;
+    state.audio.clock = null;
+    state.audio.drift = null;
+    postAudioSync(true);
+  }
+};
+
+const releaseAudioHold = () => {
+  if (!state.audio.holding) return;
+  const buffered = Math.max(0, state.audio.heldBufferedSeconds || 0);
+  if (Number.isFinite(state.audio.lastQueuedEndPts) && buffered > 0) {
+    state.audio.bufferedSeconds = buffered;
+    state.audio.statusReady = true;
+    state.audio.basePts = state.audio.lastQueuedEndPts - buffered;
+    if (state.audio.context) {
+      state.audio.startTime = state.audio.context.currentTime - state.audio.basePts;
+    }
+  }
+  state.audio.holding = false;
+  state.audio.seekVideoSettled = false;
+  state.audio.heldBufferedSeconds = 0;
+  if (state.audio.worklet) {
+    state.audio.worklet.port.postMessage({ type: "hold", enabled: false });
+  }
+  recoverAudioClock();
+};
+
+const maybeReleaseSeekAudioHold = () => {
+  if (!state.audio.holding || !state.audio.seekVideoSettled) return;
+  if (
+    !state.media.hasAudio ||
+    state.audio.heldBufferedSeconds >= AUDIO_SEEK_PREROLL_SECONDS
+  ) {
+    releaseAudioHold();
+  }
+};
+
+const postAudioFrameToWorklet = (frame) => {
+  if (!state.audio.worklet || !frame?.buffer) return;
+  const pts = Number.isFinite(frame.pts) ? frame.pts : null;
+  const duration = Number.isFinite(frame.duration)
+    ? frame.duration
+    : audioFrameDuration(frame.buffer, frame.sampleRate, frame.channels);
+  if (pts !== null) {
+    state.audio.lastQueuedPts = pts;
+    state.audio.lastQueuedEndPts = pts + duration;
+  } else if (Number.isFinite(state.audio.lastQueuedEndPts)) {
+    state.audio.lastQueuedEndPts += duration;
+  }
+  state.audio.worklet.port.postMessage({ type: "push", buffer: frame.buffer }, [
+    frame.buffer,
+  ]);
+};
+
 const flushAudioQueue = () => {
   if (!state.audio.ready || !state.audio.worklet) return 0;
   let flushed = 0;
   while (state.audio.pending.length) {
-    const buffer = state.audio.pending.shift();
-    state.audio.worklet.port.postMessage({ type: "push", buffer }, [buffer]);
+    postAudioFrameToWorklet(state.audio.pending.shift());
     flushed += 1;
   }
+  recoverAudioClock();
   return flushed;
 };
 
@@ -990,7 +1224,7 @@ const initAudio = (sampleRate, channels) => {
       return null;
     }
 
-    await audioContext.audioWorklet.addModule("audio-worklet.js");
+    await audioContext.audioWorklet.addModule(versionedAssetUrl("audio-worklet.js"));
     const worklet = new AudioWorkletNode(audioContext, "ffmpeg-audio");
     const gain = audioContext.createGain();
     gain.gain.value = state.volume;
@@ -998,7 +1232,14 @@ const initAudio = (sampleRate, channels) => {
     worklet.connect(gain).connect(audioContext.destination);
     worklet.port.onmessage = (event) => {
       if (!event.data || event.data.type !== "status") return;
-      const { availableFrames, bufferedSeconds, droppedSamples, underrunFrames } = event.data;
+      const {
+        availableFrames,
+        bufferedSeconds,
+        droppedSamples,
+        trimmedSamples,
+        underrunFrames,
+        capacityFrames,
+      } = event.data;
       if (Number.isFinite(availableFrames)) {
         state.audio.availableFrames = availableFrames;
       }
@@ -1008,12 +1249,23 @@ const initAudio = (sampleRate, channels) => {
       if (Number.isFinite(droppedSamples)) {
         state.audio.droppedSamples = droppedSamples;
       }
+      if (Number.isFinite(trimmedSamples)) {
+        state.audio.trimmedSamples = trimmedSamples;
+      }
       if (Number.isFinite(underrunFrames)) {
         state.audio.underrunFrames = underrunFrames;
       }
+      if (Number.isFinite(capacityFrames)) {
+        state.audio.capacityFrames = capacityFrames;
+      }
+      state.audio.statusReady = true;
+      recoverAudioClock();
       updateDiagnostics();
     };
     worklet.port.postMessage({ type: "config", channels });
+    if (state.audio.holding) {
+      worklet.port.postMessage({ type: "hold", enabled: true });
+    }
 
     state.audio.context = audioContext;
     state.audio.worklet = worklet;
@@ -1038,29 +1290,53 @@ const initAudio = (sampleRate, channels) => {
   return state.audio.initPromise;
 };
 
-const queueAudioBuffer = (buffer, pts) => {
+const queueAudioBuffer = (buffer, pts, sampleRate = state.audio.sampleRate, channels = state.audio.channels || 2) => {
+  const frame = {
+    buffer,
+    pts,
+    sampleRate,
+    channels,
+    duration: audioFrameDuration(buffer, sampleRate, channels),
+  };
   if (!state.audio.ready || !state.audio.worklet) {
-    if (state.audio.pending.length < MAX_PENDING_AUDIO_BUFFERS) {
-      state.audio.pending.push(buffer);
+    if (state.audio.pending.length >= MAX_PENDING_AUDIO_BUFFERS) {
+      state.audio.pending.shift();
     }
+    state.audio.pending.push(frame);
   } else {
-    state.audio.worklet.port.postMessage({ type: "push", buffer }, [buffer]);
+    postAudioFrameToWorklet(frame);
+  }
+  if (state.audio.holding) {
+    state.audio.heldBufferedSeconds += frame.duration || 0;
+    state.audio.bufferedSeconds = state.audio.heldBufferedSeconds;
+    maybeReleaseSeekAudioHold();
   }
 
   if (state.audio.basePts === null && Number.isFinite(pts)) {
     state.audio.basePts = pts;
     syncAudioClock();
   }
+  recoverAudioClock();
 };
 
-const clearAudioQueue = () => {
+const clearAudioQueue = ({ hold = false } = {}) => {
   if (state.audio.worklet)
     state.audio.worklet.port.postMessage({ type: "clear" });
   state.audio.pending = [];
   state.audio.basePts = null;
+  state.audio.lastQueuedPts = null;
+  state.audio.lastQueuedEndPts = null;
+  state.audio.heldBufferedSeconds = 0;
+  state.audio.seekVideoSettled = false;
+  state.audio.seekVideoSettledAt = 0;
+  state.audio.clock = null;
+  state.audio.drift = null;
+  state.audio.statusReady = false;
   state.audio.startTime = state.audio.context
     ? state.audio.context.currentTime
     : 0;
+  setAudioHold(hold);
+  postAudioSync(true);
 };
 
 const closeAudio = async () => {
@@ -1093,6 +1369,8 @@ const resetUi = () => {
   state.frames = 0;
   state.bytes = 0;
   state.pts = 0;
+  state.source = createDefaultSourceState();
+  state.formatHint = "";
   state.chapters = [];
   state.hasOrderedChapters = false;
   state.attachments = [];
@@ -1113,6 +1391,7 @@ const resetUi = () => {
   renderChapterMenu();
   renderAttachmentInspector();
   updateMediaMode();
+  updateSourceOverlay();
   updateDiagnostics();
 };
 
@@ -1157,15 +1436,20 @@ if (canvasWrap) {
 }
 
 const stopPlayback = async () => {
+  const workerStop = state.worker ? waitForWorkerStop() : Promise.resolve();
   state.playing = false;
   state.started = false;
   if (state.worker) state.worker.postMessage({ type: "stop" });
-  await closeAudio();
+  const [, stopped] = await Promise.all([closeAudio(), workerStop]);
+  if (state.worker && stopped === false) {
+    state.workerNeedsRestart = true;
+  }
   pauseBtn.disabled = true;
   stopBtn.disabled = true;
   startBtn.disabled = !state.ready;
   syncOverlayControls();
   resetUi();
+  setStatus(state.ready ? "Ready" : "Stopped");
   log("Stopped.");
   setPausedState(true);
 };
@@ -1182,18 +1466,26 @@ const pausePlayback = () => {
   setPausedState(true);
 };
 
-const startPlayback = async () => {
+const startPlayback = async (sourceOverride = null) => {
   if (!state.ready || !state.worker) return;
 
-  const file = fileInput.files && fileInput.files[0];
-  const url = urlInput.value.trim();
+  const overrideFile = sourceOverride?.file || null;
+  const overrideUrl = sourceOverride?.url ? String(sourceOverride.url).trim() : "";
+  const selectedFile = fileInput?.files && fileInput.files[0] ? fileInput.files[0] : null;
+  const selectedUrl = urlInput?.value ? urlInput.value.trim() : "";
+  const file = overrideFile || selectedFile;
+  const url = file ? "" : overrideUrl || selectedUrl;
 
   if (!state.started) {
     if (!file && !url) {
       log("Choose a file or enter a URL.");
       // Open file picker if nothing selected
-      if (!file && !url) fileInput.click();
+      if (!file && !url && fileInput) fileInput.click();
       return;
+    }
+    if (url) {
+      urlInput.value = url;
+      if (sourceUrlInput) sourceUrlInput.value = url;
     }
     setChapterData({ chapters: [], hasOrderedChapters: false });
     setAttachmentData({ attachments: [] });
@@ -1271,6 +1563,78 @@ const commitSeekFromUi = () => {
   performSeek(value);
 };
 
+const stopWaiters = new Set();
+const readyWaiters = new Set();
+
+const resolveStopWaiters = () => {
+  for (const resolve of stopWaiters) resolve(true);
+  stopWaiters.clear();
+};
+
+const waitForWorkerStop = () =>
+  new Promise((resolve) => {
+    let timeout = 0;
+    const done = (acked) => {
+      clearTimeout(timeout);
+      stopWaiters.delete(done);
+      resolve(Boolean(acked));
+    };
+    timeout = setTimeout(() => done(false), STOP_ACK_TIMEOUT_MS);
+    stopWaiters.add(done);
+  });
+
+const resolveReadyWaiters = () => {
+  for (const resolve of readyWaiters) resolve(true);
+  readyWaiters.clear();
+};
+
+const waitForWorkerReady = (timeoutMs = 10000) => {
+  if (state.ready && state.worker) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timeout = 0;
+    const done = (ready) => {
+      clearTimeout(timeout);
+      readyWaiters.delete(done);
+      resolve(Boolean(ready));
+    };
+    timeout = setTimeout(() => done(false), timeoutMs);
+    readyWaiters.add(done);
+  });
+};
+
+const replacePlaybackCanvases = () => {
+  if (!canvas2d || !canvasGl) return;
+  const next2d = document.createElement("canvas");
+  next2d.id = "canvas2d";
+  const nextGl = document.createElement("canvas");
+  nextGl.id = "canvasGl";
+  nextGl.className = "is-hidden";
+  canvas2d.replaceWith(next2d);
+  canvasGl.replaceWith(nextGl);
+  canvas2d = next2d;
+  canvasGl = nextGl;
+  setRenderMode(state.renderMode);
+};
+
+const restartWorker = async () => {
+  if (state.worker) {
+    state.worker.terminate();
+    state.worker = null;
+  }
+  resolveStopWaiters();
+  state.ready = false;
+  state.workerNeedsRestart = false;
+  replacePlaybackCanvases();
+  setStatus("Initializing worker...");
+  initWorker();
+  const ready = await waitForWorkerReady();
+  if (!ready) {
+    state.workerNeedsRestart = true;
+    setStatus("Worker restart failed");
+  }
+  return ready;
+};
+
 const initWorker = () => {
   if (!canvas2d.transferControlToOffscreen) {
     setStatus("OffscreenCanvas unsupported");
@@ -1278,7 +1642,7 @@ const initWorker = () => {
     return;
   }
 
-  const worker = new Worker("ffmpeg-worker.js");
+  const worker = new Worker(versionedAssetUrl("ffmpeg-worker.js"));
   state.worker = worker;
   worker.onmessage = (event) => {
     const msg = event.data;
@@ -1286,9 +1650,11 @@ const initWorker = () => {
 
     if (msg.type === "ready") {
       state.ready = true;
+      state.workerNeedsRestart = false;
       startBtn.disabled = false;
       setStatus("Ready");
       syncOverlayControls();
+      resolveReadyWaiters();
       return;
     }
 
@@ -1329,8 +1695,15 @@ const initWorker = () => {
       return;
     }
 
+    if (msg.type === "stopped") {
+      state.workerNeedsRestart = false;
+      resolveStopWaiters();
+      return;
+    }
+
     if (msg.type === "debugSnapshot") {
       const worker = msg.worker || {};
+      state.workerDebug = worker;
       if (Number.isFinite(worker.heapBytes)) {
         state.source.heapBytes = worker.heapBytes;
       }
@@ -1399,12 +1772,20 @@ const initWorker = () => {
       const pts = Number.isFinite(msg.pts) ? msg.pts : null;
       if (!state.audio.initPromise && !state.audio.failed)
         initAudio(sampleRate, channels);
-      if (msg.buffer instanceof ArrayBuffer) queueAudioBuffer(msg.buffer, pts);
+      if (msg.buffer instanceof ArrayBuffer)
+        queueAudioBuffer(msg.buffer, pts, sampleRate, channels);
       return;
     }
 
     if (msg.type === "audioClear") {
-      clearAudioQueue();
+      clearAudioQueue({ hold: state.audio.holding || Boolean(msg.hold) });
+      return;
+    }
+
+    if (msg.type === "seekSettled") {
+      state.audio.seekVideoSettled = true;
+      state.audio.seekVideoSettledAt = performance.now();
+      maybeReleaseSeekAudioHold();
       return;
     }
 
@@ -1437,6 +1818,7 @@ const initWorker = () => {
   worker.onerror = (event) => {
     log(`Worker error: ${event.message}`);
     setStatus("Worker error");
+    state.workerNeedsRestart = true;
   };
 
   if (canvas2d._transferred || canvasGl._transferred) {
@@ -1481,6 +1863,51 @@ document.addEventListener("click", (e) => {
   }
 });
 
+const isLikelyMediaFile = (file) => {
+  if (!file) return false;
+  if (file.type?.startsWith("video/") || file.type?.startsWith("audio/")) {
+    return true;
+  }
+  return FORMAT_BY_EXTENSION.has(extensionFromName(file.name));
+};
+
+const startNewSource = async ({ file = null, url = "" } = {}) => {
+  const nextUrl = String(url || "").trim();
+  if (!file && !nextUrl) return;
+  if (!state.ready) {
+    setStatus("Initializing worker...");
+    log("Worker is still initializing.");
+    return;
+  }
+
+  if (file) {
+    if (urlInput) urlInput.value = "";
+    if (sourceUrlInput) sourceUrlInput.value = "";
+  } else if (nextUrl) {
+    if (urlInput) urlInput.value = nextUrl;
+    if (sourceUrlInput) sourceUrlInput.value = nextUrl;
+    if (fileInput) fileInput.value = "";
+  }
+
+  if (state.started || state.playing || state.workerNeedsRestart) {
+    await closeAudio();
+    state.started = false;
+    state.playing = false;
+    syncOverlayControls();
+    resetUi();
+    const ready = await restartWorker();
+    if (!ready) return;
+  } else {
+    resetUi();
+  }
+
+  await startPlayback({ file, url: nextUrl });
+};
+
+const setLauncherDragging = (isDragging) => {
+  if (sourceLauncher) sourceLauncher.classList.toggle("is-dragging", isDragging);
+};
+
 // File / URL
 if (menuOpenBtn) menuOpenBtn.addEventListener("click", () => fileInput.click());
 if (menuUrlBtn)
@@ -1497,29 +1924,75 @@ if (urlCancelBtn)
   );
 if (urlLoadBtn)
   urlLoadBtn.addEventListener("click", () => {
-    if (urlInput.value.trim()) {
+    const url = urlInput.value.trim();
+    if (url) {
       urlModal.classList.remove("visible");
-      stopPlayback().then(() => {
-        fileInput.value = ""; // clear file
-        startPlayback();
-      });
+      startNewSource({ url });
     }
   });
+
+if (urlInput)
+  urlInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    const url = urlInput.value.trim();
+    if (url) {
+      urlModal.classList.remove("visible");
+      startNewSource({ url });
+    }
+  });
+
+if (sourceFileBtn)
+  sourceFileBtn.addEventListener("click", () => {
+    if (fileInput) fileInput.click();
+  });
+
+if (sourceUrlForm)
+  sourceUrlForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const url = sourceUrlInput?.value.trim() || "";
+    if (!url) {
+      sourceUrlInput?.focus();
+      return;
+    }
+    startNewSource({ url });
+  });
+
+if (sourceLauncher) {
+  ["dragenter", "dragover"].forEach((type) => {
+    sourceLauncher.addEventListener(type, (event) => {
+      if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+      event.preventDefault();
+      setLauncherDragging(true);
+    });
+  });
+
+  ["dragleave", "dragend"].forEach((type) => {
+    sourceLauncher.addEventListener(type, () => setLauncherDragging(false));
+  });
+
+  sourceLauncher.addEventListener("drop", (event) => {
+    event.preventDefault();
+    setLauncherDragging(false);
+    const files = Array.from(event.dataTransfer?.files || []);
+    const file = files.find(isLikelyMediaFile) || files[0];
+    if (file) startNewSource({ file });
+  });
+}
 
 // File Input
 fileInput.addEventListener("change", () => {
   if (fileInput.files && fileInput.files[0]) {
-    urlInput.value = "";
-    stopPlayback().then(() => startPlayback());
+    startNewSource({ file: fileInput.files[0] });
   }
 });
 
 // Playback Controls
-startBtn.addEventListener("click", startPlayback);
+startBtn.addEventListener("click", () => startPlayback());
 pauseBtn.addEventListener("click", pausePlayback);
 stopBtn.addEventListener("click", stopPlayback);
 
-if (overlayPlay) overlayPlay.addEventListener("click", startPlayback);
+if (overlayPlay) overlayPlay.addEventListener("click", () => startPlayback());
 if (overlayPause) overlayPause.addEventListener("click", pausePlayback);
 
 if (seekRange) {
@@ -1551,7 +2024,7 @@ if (canvasWrap) {
   canvasWrap.addEventListener("click", (e) => {
     if (
       e.target.closest(
-        "button, input, .menu-item, .controls-overlay, .menu-bar-overlay"
+        "button, input, .source-launcher, .menu-item, .controls-overlay, .menu-bar-overlay"
       )
     ) {
       return;
@@ -1615,15 +2088,11 @@ if (screenshotBtn)
 
 // Audio Delay
 const setAudioDelay = (seconds) => {
-  const previous = state.audioDelay || 0;
   state.audioDelay = seconds;
-  if (state.audio.basePts !== null) {
-    state.audio.basePts += seconds - previous;
-    syncAudioClock();
-  }
   if (audioDelayInput) audioDelayInput.value = (seconds * 1000).toString();
   if (audioDelayDisplay)
     audioDelayDisplay.textContent = `${(seconds * 1000).toFixed(0)}ms`;
+  recoverAudioClock();
   updateDiagnostics();
 };
 

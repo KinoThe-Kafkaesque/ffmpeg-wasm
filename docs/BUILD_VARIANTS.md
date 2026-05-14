@@ -2,7 +2,16 @@
 
 This document lists the 4 primary build variants and the codecs supported by each.
 
-> Current caveat: these lists still need generated-config scrutiny. `docs/TODO.md` tracks that as S005. Until then, treat this document as intended variant policy, not proof that FFmpeg disabled every unrelated default codec/demuxer.
+All variants are playback-only builds. The configure profile disables FFmpeg
+programs, network, devices, filters, encoders, muxers, iconv, and runtime CPU
+detection, then explicitly enables only the demuxers, parsers, decoders, `file`
+protocol, and VP9 superframe bitstream filter needed by the WASM API.
+
+Each build now writes `ffmpeg_wasm.capabilities.json` beside `ffmpeg_wasm.js` and `ffmpeg_wasm.wasm`. Consumer apps should read that manifest to decide whether the release can handle a source, whether pthread headers are required, and whether browser-native fallback is acceptable. The fallback decision belongs in the consumer app, not in this WASM build repo.
+
+Each build also writes `ffmpeg-components.json` from the generated FFmpeg
+configuration. The build fails if an encoder, muxer, filter, device, program,
+network path, or unexpected playback component is enabled.
 
 ## Variant Overview
 
@@ -33,7 +42,6 @@ Strictly royalty-free codec set, avoiding patent-encumbered codecs like HEVC and
 - huffyuv
 - utvideo
 - mjpeg
-- png
 - rawvideo
 
 ### Audio Decoders
@@ -45,6 +53,7 @@ Strictly royalty-free codec set, avoiding patent-encumbered codecs like HEVC and
 - tta
 - pcm_s16le
 - pcm_s24le
+- pcm_s32le
 - pcm_f32le
 - pcm_s16be
 - pcm_u8
@@ -62,6 +71,7 @@ Default variant with common, widely-used codecs including HEVC and H.264. Patent
 - hevc
 - av1 via libdav1d
 - h264
+- h263
 - vp8
 - vp9
 - mpeg4
@@ -71,13 +81,18 @@ Default variant with common, widely-used codecs including HEVC and H.264. Patent
 - aac
 - ac3
 - eac3
+- alac
 - mp3
 - opus
 - vorbis
 - flac
 - pcm_s16le
 - pcm_s24le
+- pcm_s32le
 - pcm_f32le
+- pcm_s16be
+- pcm_u8
+- pcm_s8
 
 ---
 
@@ -89,6 +104,7 @@ Identical codec set to "full" variant but requires GPL compliance (open-source o
 - hevc
 - av1 via libdav1d
 - h264
+- h263
 - vp8
 - vp9
 - mpeg4
@@ -98,13 +114,18 @@ Identical codec set to "full" variant but requires GPL compliance (open-source o
 - aac
 - ac3
 - eac3
+- alac
 - mp3
 - opus
 - vorbis
 - flac
 - pcm_s16le
 - pcm_s24le
+- pcm_s32le
 - pcm_f32le
+- pcm_s16be
+- pcm_u8
+- pcm_s8
 
 ---
 
@@ -124,7 +145,6 @@ Royalty-free codec set with GPL license obligations (open-source required). Comb
 - huffyuv
 - utvideo
 - mjpeg
-- png
 - rawvideo
 
 ### Audio Decoders
@@ -136,6 +156,7 @@ Royalty-free codec set with GPL license obligations (open-source required). Comb
 - tta
 - pcm_s16le
 - pcm_s24le
+- pcm_s32le
 - pcm_f32le
 - pcm_s16be
 - pcm_u8
@@ -157,5 +178,6 @@ Royalty-free codec set with GPL license obligations (open-source required). Comb
 - **Patent-encumbered** variants include H.264/HEVC/AAC/MP3 which may require patent licenses for commercial use
 - **Royalty-free** variants use only codecs without known patent encumbrances (AV1 through dav1d, VP8/VP9, Opus, Vorbis, etc.)
 - **AV1 in WASM** uses the external libdav1d software decoder. FFmpeg's built-in AV1 decoder expects hardware acceleration in this build shape and returns `AVERROR(ENOSYS)` when no hardware pixel format is available.
+- **Encoding/transcoding is intentionally unsupported**. If a future product needs exports, add a separate encode/transcode build instead of bloating the playback build.
 - **LGPL** variants can be used in proprietary applications with proper attribution
 - **GPL** variants require the entire application to be open-sourced under GPL

@@ -111,6 +111,16 @@ copy_to() {
   else
     rm -f "$target_dir/ffmpeg_wasm.wasm.map"
   fi
+  if [ -f "$SRC_DIR/ffmpeg_wasm.capabilities.json" ]; then
+    cp "$SRC_DIR/ffmpeg_wasm.capabilities.json" "$target_dir/"
+  else
+    rm -f "$target_dir/ffmpeg_wasm.capabilities.json"
+  fi
+  if [ -f "$SRC_DIR/ffmpeg-components.json" ]; then
+    cp "$SRC_DIR/ffmpeg-components.json" "$target_dir/"
+  else
+    rm -f "$target_dir/ffmpeg-components.json"
+  fi
   if [ "$target_dir" != "$ROOT_DIR/web" ]; then
     cp "$ROOT_DIR/web/ffmpeg-wasm-api.js" "$target_dir/"
   fi
@@ -119,4 +129,4 @@ copy_to() {
 copy_to "$ROOT_DIR/web"
 copy_to "$ROOT_DIR/web-react/public"
 
-echo "Copied $BUILD_MODE ffmpeg_wasm assets and ffmpeg-wasm-api.js into web/ and web-react/public/"
+echo "Copied $BUILD_MODE ffmpeg_wasm assets, manifests, and ffmpeg-wasm-api.js into web/ and web-react/public/"

@@ -26,6 +26,29 @@ EMCC_THREAD_FLAGS=()
 FFMPEG_THREAD_FLAGS=(--disable-pthreads)
 DECODER_THREAD_COUNT=1
 
+COMMON_DEMUXERS=(mov matroska avi mpegts mp3 ogg flac wav)
+COMMON_PROTOCOLS=(file)
+COMMON_BSFS=(vp9_superframe_split)
+FULL_DECODERS=(
+  hevc libdav1d h264 h263 vp8 vp9 mpeg4 mpeg2video
+  aac aac_latm ac3 eac3 mp3 mp3float opus vorbis flac alac
+  pcm_s16le pcm_s24le pcm_s32le pcm_f32le pcm_s16be pcm_u8 pcm_s8
+  ass ssa subrip webvtt
+)
+FULL_PARSERS=(
+  hevc av1 h264 h263 vp8 vp9 mpeg4video mpegvideo
+  mpegaudio aac aac_latm ac3 opus vorbis flac
+)
+ROYALTYFREE_DECODERS=(
+  libdav1d vp9 vp8 theora dirac ffv1 huffyuv utvideo mjpeg rawvideo
+  opus vorbis flac speex wavpack tta
+  pcm_s16le pcm_s24le pcm_s32le pcm_f32le pcm_s16be pcm_u8 pcm_s8
+  ass ssa subrip webvtt
+)
+ROYALTYFREE_PARSERS=(av1 vp9 vp8 dirac mjpeg opus vorbis flac)
+ENABLED_DECODERS=()
+ENABLED_PARSERS=()
+
 usage() {
   cat <<'EOF'
 Usage: ./scripts/build-ffmpeg.sh [--debug] [--variant royaltyfree|royaltyfree-lgpl|full|gpl|gpl-royaltyfree|royaltyfree-gpl|lgpl|nonfree]
@@ -77,6 +100,11 @@ strip_generated_js_trailing_whitespace() {
   else
     sed -i 's/[[:blank:]]\+$//' "$js_file"
   fi
+}
+
+component_csv() {
+  local IFS=,
+  echo "$*"
 }
 
 write_dav1d_cross_file() {
@@ -218,38 +246,38 @@ case "${VARIANT:-full}" in
   royaltyfree|royaltyfree-lgpl)
     OUT_DIR="$ROOT_DIR/build/ffmpeg-wasm-royaltyfree"
     LICENSE_FLAGS=()
-    DECODER_FLAGS=(--disable-decoders --enable-decoder=libdav1d,vp9,vp8,theora,dirac,ffv1,huffyuv,utvideo,mjpeg,png,rawvideo,opus,vorbis,flac,speex,wavpack,tta,pcm_s16le,pcm_s24le,pcm_f32le,pcm_s16be,pcm_u8,pcm_s8,ass,ssa,subrip,webvtt)
-    PARSER_FLAGS=(--disable-parsers --enable-parser=av1,vp9,vp8,theora,dirac,ffv1,huffyuv,utvideo,mjpeg,opus,vorbis,flac,speex,wavpack,tta)
+    ENABLED_DECODERS=("${ROYALTYFREE_DECODERS[@]}")
+    ENABLED_PARSERS=("${ROYALTYFREE_PARSERS[@]}")
     ;;
   full|"")
     OUT_DIR="$ROOT_DIR/build/ffmpeg-wasm"
     LICENSE_FLAGS=()
-    DECODER_FLAGS=(--enable-decoder=hevc,libdav1d,h264,vp8,vp9,mpeg4,mpeg2video,aac,ac3,eac3,mp3,opus,vorbis,flac,pcm_s16le,pcm_s24le,pcm_f32le,ass,ssa,subrip,webvtt)
-    PARSER_FLAGS=(--enable-parser=hevc,av1,h264,vp8,vp9,mpeg4video,mpegaudio,aac,ac3,opus,vorbis,flac)
+    ENABLED_DECODERS=("${FULL_DECODERS[@]}")
+    ENABLED_PARSERS=("${FULL_PARSERS[@]}")
     ;;
   gpl)
     OUT_DIR="$ROOT_DIR/build/ffmpeg-wasm-gpl"
     LICENSE_FLAGS=(--enable-gpl)
-    DECODER_FLAGS=(--enable-decoder=hevc,libdav1d,h264,vp8,vp9,mpeg4,mpeg2video,aac,ac3,eac3,mp3,opus,vorbis,flac,pcm_s16le,pcm_s24le,pcm_f32le,ass,ssa,subrip,webvtt)
-    PARSER_FLAGS=(--enable-parser=hevc,av1,h264,vp8,vp9,mpeg4video,mpegaudio,aac,ac3,opus,vorbis,flac)
+    ENABLED_DECODERS=("${FULL_DECODERS[@]}")
+    ENABLED_PARSERS=("${FULL_PARSERS[@]}")
     ;;
   gpl-royaltyfree|royaltyfree-gpl)
     OUT_DIR="$ROOT_DIR/build/ffmpeg-wasm-gpl-royaltyfree"
     LICENSE_FLAGS=(--enable-gpl)
-    DECODER_FLAGS=(--disable-decoders --enable-decoder=libdav1d,vp9,vp8,theora,dirac,ffv1,huffyuv,utvideo,mjpeg,png,rawvideo,opus,vorbis,flac,speex,wavpack,tta,pcm_s16le,pcm_s24le,pcm_f32le,pcm_s16be,pcm_u8,pcm_s8,ass,ssa,subrip,webvtt)
-    PARSER_FLAGS=(--disable-parsers --enable-parser=av1,vp9,vp8,theora,dirac,ffv1,huffyuv,utvideo,mjpeg,opus,vorbis,flac,speex,wavpack,tta)
+    ENABLED_DECODERS=("${ROYALTYFREE_DECODERS[@]}")
+    ENABLED_PARSERS=("${ROYALTYFREE_PARSERS[@]}")
     ;;
   lgpl)
     OUT_DIR="$ROOT_DIR/build/ffmpeg-wasm"
     LICENSE_FLAGS=()
-    DECODER_FLAGS=(--enable-decoder=hevc,libdav1d,h264,vp8,vp9,mpeg4,mpeg2video,aac,ac3,eac3,mp3,opus,vorbis,flac,pcm_s16le,pcm_s24le,pcm_f32le,ass,ssa,subrip,webvtt)
-    PARSER_FLAGS=(--enable-parser=hevc,av1,h264,vp8,vp9,mpeg4video,mpegaudio,aac,ac3,opus,vorbis,flac)
+    ENABLED_DECODERS=("${FULL_DECODERS[@]}")
+    ENABLED_PARSERS=("${FULL_PARSERS[@]}")
     ;;
   nonfree)
     OUT_DIR="$ROOT_DIR/build/ffmpeg-wasm-nonfree"
     LICENSE_FLAGS=(--enable-nonfree)
-    DECODER_FLAGS=(--enable-decoder=hevc,libdav1d,h264,vp8,vp9,mpeg4,mpeg2video,aac,ac3,eac3,mp3,opus,vorbis,flac,pcm_s16le,pcm_s24le,pcm_f32le,ass,ssa,subrip,webvtt)
-    PARSER_FLAGS=(--enable-parser=hevc,av1,h264,vp8,vp9,mpeg4video,mpegaudio,aac,ac3,opus,vorbis,flac)
+    ENABLED_DECODERS=("${FULL_DECODERS[@]}")
+    ENABLED_PARSERS=("${FULL_PARSERS[@]}")
     ;;
   *)
     echo "Unknown variant: ${VARIANT}" >&2
@@ -257,6 +285,12 @@ case "${VARIANT:-full}" in
     exit 1
     ;;
 esac
+
+DECODER_FLAGS=(--disable-decoders "--enable-decoder=$(component_csv "${ENABLED_DECODERS[@]}")")
+PARSER_FLAGS=(--disable-parsers "--enable-parser=$(component_csv "${ENABLED_PARSERS[@]}")")
+DEMUXER_FLAGS=(--disable-demuxers "--enable-demuxer=$(component_csv "${COMMON_DEMUXERS[@]}")")
+PROTOCOL_FLAGS=(--disable-protocols "--enable-protocol=$(component_csv "${COMMON_PROTOCOLS[@]}")")
+BSF_FLAGS=(--disable-bsfs "--enable-bsf=$(component_csv "${COMMON_BSFS[@]}")")
 
 if [ "$WASM_THREADS" -gt 1 ]; then
   OUT_DIR="${OUT_DIR}-pthreads${WASM_THREADS}"
@@ -421,6 +455,11 @@ popd >/dev/null
 
 pushd "$FFMPEG_SRC" >/dev/null
 
+if [ -f config.mak ]; then
+  echo "Cleaning stale FFmpeg object archives before strict component configure..."
+  make clean >/dev/null 2>&1 || true
+fi
+
 EM_PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig" \
 PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig" \
 emconfigure ./configure \
@@ -436,7 +475,18 @@ emconfigure ./configure \
   --target-os=none \
   --arch=x86_32 \
   --enable-cross-compile \
+  --disable-everything \
+  --disable-autodetect \
   --disable-asm \
+  --disable-iconv \
+  --disable-runtime-cpudetect \
+  --disable-avdevice \
+  --disable-avfilter \
+  --disable-postproc \
+  --disable-devices \
+  --disable-filters \
+  --disable-encoders \
+  --disable-muxers \
   --disable-hwaccels \
   --disable-decoder=av1 \
   --disable-stripping \
@@ -446,13 +496,23 @@ emconfigure ./configure \
   "${FFMPEG_DEBUG_FLAGS[@]}" \
   --disable-network \
   --enable-libdav1d \
-  --enable-libass \
-  --enable-protocol=file \
-  --enable-demuxer=mov,matroska,avi,mpegts,mp3,ogg,flac,wav \
-  --enable-muxer=mp4,matroska \
+  "${BSF_FLAGS[@]}" \
+  "${PROTOCOL_FLAGS[@]}" \
+  "${DEMUXER_FLAGS[@]}" \
   "${DECODER_FLAGS[@]}" \
   "${PARSER_FLAGS[@]}" \
   "${LICENSE_FLAGS[@]}"
+
+node "$ROOT_DIR/scripts/validate-ffmpeg-components.mjs" \
+  --config "$FFMPEG_SRC/config_components.h" \
+  --config-h "$FFMPEG_SRC/config.h" \
+  --out "$OUT_DIR/ffmpeg-components.json" \
+  --variant "${VARIANT:-full}" \
+  --allow-demuxer "$(component_csv "${COMMON_DEMUXERS[@]}")" \
+  --allow-protocol "$(component_csv "${COMMON_PROTOCOLS[@]}")" \
+  --allow-bsf "$(component_csv "${COMMON_BSFS[@]}")" \
+  --allow-decoder "$(component_csv "${ENABLED_DECODERS[@]}")" \
+  --allow-parser "$(component_csv "${ENABLED_PARSERS[@]}")"
 
 emmake make -j"$(nproc)"
 emmake make install
@@ -491,5 +551,15 @@ emcc "${EMCC_OPT_FLAGS[@]}" \
   -o "$OUT_JS"
 
 strip_generated_js_trailing_whitespace "$OUT_JS"
+
+node "$ROOT_DIR/scripts/write-build-manifest.mjs" \
+  --out "$OUT_DIR/ffmpeg_wasm.capabilities.json" \
+  --variant "${VARIANT:-full}" \
+  --mode "$BUILD_MODE" \
+  --decoder-threads "$DECODER_THREAD_COUNT" \
+  --pthread-pool "${WASM_THREAD_POOL:-0}" \
+  --simd "$WASM_SIMD" \
+  --stack-size "$WASM_STACK_SIZE" \
+  --safe-heap "$SAFE_HEAP"
 
 echo "Built $BUILD_MODE variant to $OUT_DIR"

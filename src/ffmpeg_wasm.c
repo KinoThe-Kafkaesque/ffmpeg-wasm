@@ -648,11 +648,11 @@ static void blend_ass_image(uint8_t *dst, int dst_stride, int dst_width, int dst
       continue;
     }
 
-    // libass uses AABBGGRR ordering
-    uint8_t a = 255 - ((img->color >> 24) & 0xFF);
-    uint8_t b = (img->color >> 16) & 0xFF;
-    uint8_t g = (img->color >> 8) & 0xFF;
-    uint8_t r = img->color & 0xFF;
+    // libass exposes ASS_Image color as RGBA with inverted ASS alpha.
+    uint8_t r = (img->color >> 24) & 0xFF;
+    uint8_t g = (img->color >> 16) & 0xFF;
+    uint8_t b = (img->color >> 8) & 0xFF;
+    uint8_t a = 255 - (img->color & 0xFF);
 
     for (int y = 0; y < img->h; y++) {
       int dst_y = img->dst_y + y;
@@ -1121,8 +1121,10 @@ static void process_subtitle_packet(FFmpegWasmContext *ctx, AVPacket *pkt) {
   }
 
   AVStream *stream = ctx->fmt->streams[ctx->subtitle_stream_index];
-  double start_sec = start_time * av_q2d(stream->time_base);
-  double duration_sec = (double)sub.end_display_time / 1000.0;
+  double packet_sec = start_time * av_q2d(stream->time_base);
+  double start_offset_sec = (double)sub.start_display_time / 1000.0;
+  double start_sec = packet_sec + start_offset_sec;
+  double duration_sec = (double)(sub.end_display_time - sub.start_display_time) / 1000.0;
   if (duration_sec <= 0.0) {
     // Some decoders (e.g. ASS) can emit zero durations; fall back to packet duration or a small default
     if (pkt->duration && pkt->duration != AV_NOPTS_VALUE) {
@@ -1157,6 +1159,19 @@ static void process_subtitle_packet(FFmpegWasmContext *ctx, AVPacket *pkt) {
   }
 
   avsubtitle_free(&sub);
+}
+
+static void reset_subtitle_track_events(FFmpegWasmContext *ctx) {
+  if (!ctx || !ctx->ass_library || !ctx->ass_track) {
+    return;
+  }
+  ass_free_track(ctx->ass_track);
+  ctx->ass_track = ass_new_track(ctx->ass_library);
+  if (ctx->ass_track && ctx->subtitle_codec &&
+      ctx->subtitle_codec->subtitle_header && ctx->subtitle_codec->subtitle_header_size > 0) {
+    ass_process_codec_private(ctx->ass_track, (char *)ctx->subtitle_codec->subtitle_header,
+                              ctx->subtitle_codec->subtitle_header_size);
+  }
 }
 
 EMSCRIPTEN_KEEPALIVE unsigned int ffmpeg_wasm_avcodec_version(void) {
@@ -1598,6 +1613,10 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_seek_seconds(uintptr_t handle, double secon
   if (ctx->audio_codec) {
     avcodec_flush_buffers(ctx->audio_codec);
   }
+  if (ctx->subtitle_codec) {
+    avcodec_flush_buffers(ctx->subtitle_codec);
+  }
+  reset_subtitle_track_events(ctx);
 
   ctx->draining = 0;
   ctx->video_eof = 0;
@@ -2339,18 +2358,7 @@ EMSCRIPTEN_KEEPALIVE int ffmpeg_wasm_subtitle_first_end_ms(uintptr_t handle) {
 
 EMSCRIPTEN_KEEPALIVE void ffmpeg_wasm_clear_subtitle_track(uintptr_t handle) {
   FFmpegWasmContext *ctx = (FFmpegWasmContext *)handle;
-  if (!ctx || !ctx->ass_library) {
-    return;
-  }
-  if (ctx->ass_track) {
-    ass_free_track(ctx->ass_track);
-    ctx->ass_track = ass_new_track(ctx->ass_library);
-    if (ctx->ass_track && ctx->subtitle_codec &&
-        ctx->subtitle_codec->subtitle_header && ctx->subtitle_codec->subtitle_header_size > 0) {
-      ass_process_codec_private(ctx->ass_track, (char *)ctx->subtitle_codec->subtitle_header,
-                                ctx->subtitle_codec->subtitle_header_size);
-    }
-  }
+  reset_subtitle_track_events(ctx);
 }
 
 #ifdef FFMPEG_WASM_TESTING

@@ -47,7 +47,9 @@ The React demo listens for these worker/native message types:
 - `debugSnapshot`: native decoder state plus worker state
 - `error`: worker-level errors
 
-The debug panel shows IO mode, byte positions, selected streams, packet/video/audio PTS, subtitle counts, heap size, last error, and recent seeks. Change the FFmpeg log level from the panel when you need more native output.
+The debug panel shows IO mode, byte positions, selected streams, packet/video/audio PTS, subtitle counts, heap size, last error, recent seeks, audio drift, buffered audio seconds, skipped video frames, and whether the worker is using a separate native audio context. Change the FFmpeg log level from the panel when you need more native output.
+
+For seekable local files and HTTP Range URLs, the worker opens a second native FFmpeg context for audio-only decode. The main context keeps video/subtitles; the audio context is seeked with the main context and throttled from AudioWorklet buffer feedback. Append-stream sources keep the single-context path.
 
 ## Native Snapshot
 

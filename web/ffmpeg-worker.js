@@ -1,8 +1,15 @@
 /* global FFmpegWasm */
 
+const WORKER_ASSET_VERSION = "20260513-seek-preroll";
+const versionedAssetUrl = (path, prefix = "") => {
+  const base = `${prefix || ""}${path}`;
+  const separator = base.includes("?") ? "&" : "?";
+  return `${base}${separator}v=${encodeURIComponent(WORKER_ASSET_VERSION)}`;
+};
+
 let apiBootstrapError = null;
 try {
-  importScripts("ffmpeg-wasm-api.js");
+  importScripts(versionedAssetUrl("ffmpeg-wasm-api.js"));
 } catch (err) {
   apiBootstrapError = err;
 }
@@ -13,6 +20,14 @@ const DEFAULT_MAX_BUFFER_BYTES = 512 * 1024 * 1024;
 const SEEK_MAX_BUFFER_BYTES = 48 * 1024 * 1024;
 const BUFFER_POLL_MS = 15;
 const MAX_CHUNK_BYTES = 256 * 1024;
+const SEEK_AUDIO_PREROLL_SECONDS = 0.03;
+const SEEK_AUDIO_MAX_FRAMES = 96;
+const VIDEO_AUDIO_SYNC_SKIP_LATE_SECONDS = 0.12;
+const VIDEO_AUDIO_SYNC_MAX_DELAY_SECONDS = 0.5;
+const POST_SEEK_AUDIO_SYNC_GRACE_MS = 5000;
+const SEPARATE_AUDIO_MAX_BUFFER_SECONDS = 0.9;
+const SEPARATE_AUDIO_REFILL_DELAY_MS = 8;
+const SEPARATE_AUDIO_WAIT_DELAY_MS = 30;
 const MIN_OPEN_BYTES = 2 * 1024 * 1024; // Default minimum bytes before attempting to open container
 const MIN_OPEN_BYTES_SMALL = 256 * 1024; // Lower threshold for small files
 const HEADER_SAMPLE_BYTES = 32; // Bytes to sample for EBML header sanity-check
@@ -31,6 +46,11 @@ const state = {
   Module: null,
   api: null,
   ctx: 0,
+  audioCtx: 0,
+  audioCtxStreamIndex: -1,
+  separateAudio: false,
+  audioDecodeTimer: null,
+  lastSeparateAudioPts: null,
   opened: false,
   playing: false,
   waitingForData: false,
@@ -54,6 +74,10 @@ const state = {
   seekSlow: false,
   seeking: false,
   seekTarget: null,
+  seekAudioFrames: [],
+  seekSettledAt: 0,
+  audioSync: null,
+  skippedVideoFrames: 0,
   seekUiLast: 0,
   seekPreviewLast: 0,
   maxBufferBytes: DEFAULT_MAX_BUFFER_BYTES,
@@ -78,6 +102,7 @@ const state = {
   lastStatsSent: 0,
   lastDebugSent: 0,
   lastDecodeResult: null,
+  lastAudioDecodeResult: null,
   recentSeeks: [],
   durationCheckLast: 0,
   durationUnknownLogged: false,
@@ -252,15 +277,21 @@ const getStreamsPayload = () => {
   const selectedVideo = state.api.selectedVideoStream
     ? state.api.selectedVideoStream(state.ctx)
     : -1;
-  const selectedAudio = state.api.selectedAudioStream
-    ? state.api.selectedAudioStream(state.ctx)
-    : -1;
+  const selectedAudio =
+    state.separateAudio && state.audioCtxStreamIndex >= -1
+      ? state.audioCtxStreamIndex
+      : state.api.selectedAudioStream
+        ? state.api.selectedAudioStream(state.ctx)
+        : -1;
   const selectedSubtitle = state.api.selectedSubtitleStream
     ? state.api.selectedSubtitleStream(state.ctx)
     : -1;
-  const audioEnabled = state.api.audioIsEnabled
-    ? Boolean(state.api.audioIsEnabled(state.ctx))
-    : true;
+  const audioEnabled =
+    state.separateAudio
+      ? state.audioCtxStreamIndex !== -2
+      : state.api.audioIsEnabled
+        ? Boolean(state.api.audioIsEnabled(state.ctx))
+        : true;
   const subtitlesEnabled = state.api.subtitlesEnabled
     ? Boolean(state.api.subtitlesEnabled(state.ctx))
     : false;
@@ -427,18 +458,28 @@ const emitDebugSnapshot = (force = false) => {
       draining: state.draining,
       seeking: state.seeking,
       seekTarget: state.seekTarget,
+      seekSettledAt: state.seekSettledAt,
       seekEnabled: state.seekEnabled,
       seekSlow: state.seekSlow,
       ioMode: state.ioMode,
+      separateAudio: state.separateAudio,
+      audioCtx: state.audioCtx,
+      audioCtxStreamIndex: state.audioCtxStreamIndex,
+      lastSeparateAudioPts: state.lastSeparateAudioPts,
       currentTime: state.currentTime,
       duration: state.duration,
       frames: state.frames,
       bytes: state.bytes,
       heapBytes: state.Module?.HEAPU8?.buffer?.byteLength || 0,
       lastDecodeResult: state.lastDecodeResult,
+      lastAudioDecodeResult: state.lastAudioDecodeResult,
       lastOpenError: state.lastOpenError,
       lastError,
       lastErrorText: errorText(lastError),
+      skippedVideoFrames: state.skippedVideoFrames,
+      audioClock: state.audioSync?.clock ?? null,
+      audioDrift: state.audioSync?.drift ?? null,
+      audioBufferedSeconds: state.audioSync?.bufferedSeconds ?? null,
       recentSeeks: state.recentSeeks.slice(-8),
     },
   });
@@ -481,7 +522,171 @@ const configureIoMode = (mode) => {
   return true;
 };
 
+const stopAudioDecodeLoop = () => {
+  if (state.audioDecodeTimer) {
+    clearTimeout(state.audioDecodeTimer);
+    state.audioDecodeTimer = null;
+  }
+};
+
+const destroyAudioDecoder = () => {
+  stopAudioDecodeLoop();
+  if (state.audioCtx && state.api) {
+    state.api.destroy(state.audioCtx);
+  }
+  state.audioCtx = 0;
+  state.audioCtxStreamIndex = -1;
+  state.separateAudio = false;
+  state.lastSeparateAudioPts = null;
+};
+
+const configureRandomAccessContext = (ctx) => {
+  if (!ctx || !state.api?.setIoMode || !hasExport("ffmpeg_wasm_set_io_mode")) {
+    return false;
+  }
+
+  if (state.api.setBufferLimit && hasExport("ffmpeg_wasm_set_buffer_limit")) {
+    state.api.setBufferLimit(ctx, BUFFER_LIMIT_BYTES);
+  }
+
+  const ret = state.api.setIoMode(ctx, FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL);
+  if (ret < 0) {
+    postLog(`Failed to set audio IO mode (${ret}).`);
+    return false;
+  }
+
+  const cacheLimit = state.rangeReadSource
+    ? URL_READ_CACHE_LIMIT_BYTES
+    : LOCAL_READ_CACHE_LIMIT_BYTES;
+  if (state.api.setCacheLimit && hasExport("ffmpeg_wasm_set_cache_limit")) {
+    state.api.setCacheLimit(ctx, cacheLimit);
+  }
+
+  const size = state.localReadSource?.size || state.rangeReadSource?.size || 0;
+  if (size > 0 && state.api.setFileSize && hasExport("ffmpeg_wasm_set_file_size")) {
+    state.api.setFileSize(ctx, size);
+  }
+
+  return true;
+};
+
+const canUseSeparateAudioContext = () =>
+  Boolean(
+    state.seekEnabled &&
+      state.ioMode === FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL &&
+      state.mediaHasVideo &&
+      state.mediaHasAudio &&
+      state.api?.selectStreams &&
+      state.api?.readFrame &&
+      state.api?.setAudioEnabled,
+  );
+
+const openSeparateAudioContext = (audioStreamIndex, startSeconds = 0) => {
+  if (!canUseSeparateAudioContext() || audioStreamIndex === -2) {
+    return false;
+  }
+
+  const initialBytes = 4 * 1024 * 1024;
+  const audioCtx = state.api.create(initialBytes);
+  if (!audioCtx) {
+    postLog("Failed to create separate audio decoder context.");
+    return false;
+  }
+
+  let keepContext = false;
+  try {
+    if (!configureRandomAccessContext(audioCtx)) {
+      return false;
+    }
+
+    const openRet = state.api.open(audioCtx, state.formatHint || null);
+    if (openRet < 0) {
+      const detail = errorText(openRet);
+      postLog(`Separate audio context open failed (${openRet}${detail ? ` ${detail}` : ""}).`);
+      return false;
+    }
+
+    const selectRet = state.api.selectStreams(
+      audioCtx,
+      -2,
+      Number.isFinite(audioStreamIndex) ? audioStreamIndex : -1,
+    );
+    if (selectRet < 0) {
+      const detail = errorText(selectRet);
+      postLog(`Separate audio track selection failed (${selectRet}${detail ? ` ${detail}` : ""}).`);
+      return false;
+    }
+
+    if (startSeconds > 0 && state.api.seek && hasExport("ffmpeg_wasm_seek_seconds")) {
+      const seekRet = state.api.seek(audioCtx, startSeconds);
+      if (seekRet < 0) {
+        const detail = errorText(seekRet);
+        postLog(`Separate audio seek failed (${seekRet}${detail ? ` ${detail}` : ""}).`);
+        return false;
+      }
+    }
+
+    destroyAudioDecoder();
+    state.audioCtx = audioCtx;
+    state.audioCtxStreamIndex = state.api.selectedAudioStream
+      ? state.api.selectedAudioStream(audioCtx)
+      : audioStreamIndex;
+    state.separateAudio = true;
+    state.lastSeparateAudioPts = Number.isFinite(startSeconds)
+      ? Math.max(0, startSeconds)
+      : null;
+    state.api.setAudioEnabled(state.ctx, 0);
+    keepContext = true;
+    postLog(
+      `Using separate native FFmpeg audio context for stream ${state.audioCtxStreamIndex}.`,
+    );
+    return true;
+  } catch (err) {
+    postLog(`Separate audio context failed: ${err.message}`);
+    return false;
+  } finally {
+    if (!keepContext) {
+      state.api.destroy(audioCtx);
+    }
+  }
+};
+
+const ensureSeparateAudioContext = (startSeconds = 0) => {
+  if (!canUseSeparateAudioContext()) {
+    destroyAudioDecoder();
+    return false;
+  }
+
+  const desired = Number(state.desiredStreamSelection?.audioStreamIndex);
+  const audioStreamIndex = Number.isFinite(desired) ? desired : -1;
+  if (audioStreamIndex === -2) {
+    destroyAudioDecoder();
+    if (state.api?.setAudioEnabled && state.ctx) {
+      state.api.setAudioEnabled(state.ctx, 0);
+    }
+    return false;
+  }
+
+  return openSeparateAudioContext(audioStreamIndex, startSeconds);
+};
+
+const seekSeparateAudioContext = (target) => {
+  if (!state.separateAudio || !state.audioCtx || !state.api?.seek) {
+    return true;
+  }
+  const ret = state.api.seek(state.audioCtx, Math.max(0, target));
+  if (ret < 0) {
+    const detail = errorText(ret);
+    postLog(`Separate audio seek failed (${ret}${detail ? ` ${detail}` : ""}); rebuilding audio context.`);
+    const rebuilt = ensureSeparateAudioContext(Math.max(0, target));
+    emitStreams();
+    return rebuilt;
+  }
+  return true;
+};
+
 const destroyDecoder = () => {
+  destroyAudioDecoder();
   if (state.ctx && state.api) {
     state.api.destroy(state.ctx);
   }
@@ -500,12 +705,17 @@ const destroyDecoder = () => {
   state.baseWall = 0;
   state.seeking = false;
   state.seekTarget = null;
+  state.seekAudioFrames = [];
+  state.seekSettledAt = 0;
+  state.audioSync = null;
+  state.skippedVideoFrames = 0;
   state.seekUiLast = 0;
   state.seekPreviewLast = 0;
   state.pendingStreamSelection = null;
   state.lastOpenError = null;
   state.lastOpenErrorLogged = null;
   state.lastDecodeResult = null;
+  state.lastAudioDecodeResult = null;
   state.recentSeeks = [];
   state.headerSample = null;
   state.audioChannels = 0;
@@ -578,6 +788,7 @@ const resetPlayback = async () => {
   state.sessionToken += 1;
   state.playing = false;
   stopDecodeLoop();
+  stopAudioDecodeLoop();
   await stopStream();
   clearCanvas();
   destroyDecoder();
@@ -746,6 +957,9 @@ const tryOpen = () => {
       }
     }
     emitStreams();
+    if (ensureSeparateAudioContext(0)) {
+      emitStreams();
+    }
     emitChapters();
     emitAttachments();
     emitStats(true);
@@ -1139,9 +1353,11 @@ const renderFrame = () => {
     if (state._subtitleDebugCount === undefined) {
       state._subtitleDebugCount = 0;
     }
+    const subtitleActive = Boolean(enabled) && selectedSub >= 0;
     if (
-      state._subtitleDebugCount < 10 ||
-      (pts >= 30 && pts - (state._subtitleLastLogPts || 0) >= 1)
+      subtitleActive &&
+      (state._subtitleDebugCount < 10 ||
+        (pts >= 30 && pts - (state._subtitleLastLogPts || 0) >= 1))
     ) {
       postLog(
         `Subtitle render: ret=${drew} enabled=${enabled} track=${selectedSub} delay=${state.subtitleDelay.toFixed(
@@ -1168,30 +1384,246 @@ const renderFrame = () => {
   }
 };
 
-const handleAudioFrame = () => {
-  const channels = state.api.audioChannels(state.ctx);
-  const sampleRate = state.api.audioSampleRate(state.ctx);
-  const nbSamples = state.api.audioSamples(state.ctx);
-  const ptr = state.api.audioPtr(state.ctx);
+const readAudioFramePayload = (ctx = state.ctx) => {
+  const channels = state.api.audioChannels(ctx);
+  const sampleRate = state.api.audioSampleRate(ctx);
+  const nbSamples = state.api.audioSamples(ctx);
+  const ptr = state.api.audioPtr(ctx);
   if (!channels || !sampleRate || nbSamples <= 0 || !ptr) {
-    return;
+    return null;
   }
 
   const totalSamples = nbSamples * channels;
   const view = new Float32Array(state.Module.HEAPF32.buffer, ptr, totalSamples);
   const copy = new Float32Array(totalSamples);
   copy.set(view);
-  const pts = state.api.audioPts(state.ctx);
+  const pts = state.api.audioPts(ctx);
   if (!state.mediaHasVideo && Number.isFinite(pts)) {
     state.currentTime = pts;
   }
   state.audioChannels = channels;
   state.audioSampleRate = sampleRate;
+  return { channels, sampleRate, pts, buffer: copy.buffer };
+};
+
+const postAudioFrame = (frame) => {
+  if (!frame || !(frame.buffer instanceof ArrayBuffer)) return;
   postMessage(
-    { type: "audio", channels, sampleRate, pts, buffer: copy.buffer },
-    [copy.buffer],
+    {
+      type: "audio",
+      channels: frame.channels,
+      sampleRate: frame.sampleRate,
+      pts: frame.pts,
+      buffer: frame.buffer,
+    },
+    [frame.buffer],
   );
-  return pts;
+};
+
+const queueSeekAudioFrame = (frame) => {
+  if (!frame || !Number.isFinite(frame.pts)) return;
+  if (
+    state.seekTarget !== null &&
+    frame.pts < state.seekTarget - SEEK_AUDIO_PREROLL_SECONDS
+  ) {
+    return;
+  }
+  state.seekAudioFrames.push(frame);
+  if (state.seekAudioFrames.length > SEEK_AUDIO_MAX_FRAMES) {
+    state.seekAudioFrames.splice(
+      0,
+      state.seekAudioFrames.length - SEEK_AUDIO_MAX_FRAMES,
+    );
+  }
+};
+
+const releaseSeekAudioFrames = (videoPts) => {
+  const cutoff = Number.isFinite(videoPts)
+    ? videoPts - SEEK_AUDIO_PREROLL_SECONDS
+    : state.seekTarget !== null
+      ? state.seekTarget - SEEK_AUDIO_PREROLL_SECONDS
+      : -Infinity;
+  const frames = state.seekAudioFrames.filter(
+    (frame) => Number.isFinite(frame.pts) && frame.pts >= cutoff,
+  );
+  state.seekAudioFrames = [];
+  for (const frame of frames) {
+    postAudioFrame(frame);
+  }
+  return frames.length;
+};
+
+const predictedAudioClock = () => {
+  if (!state.audioSync || !Number.isFinite(state.audioSync.clock)) {
+    return null;
+  }
+  const wallSeconds = Number.isFinite(state.audioSync.wallSeconds)
+    ? state.audioSync.wallSeconds
+    : performance.now() / 1000;
+  const elapsed = Math.max(0, performance.now() / 1000 - wallSeconds);
+  return state.audioSync.clock + elapsed * (state.playbackSpeed || 1.0);
+};
+
+const inPostSeekAudioSyncGrace = () =>
+  state.seekSettledAt > 0 &&
+  performance.now() - state.seekSettledAt < POST_SEEK_AUDIO_SYNC_GRACE_MS;
+
+const shouldSkipLateVideoFrame = (pts) => {
+  if (
+    state.seeking ||
+    inPostSeekAudioSyncGrace() ||
+    !state.mediaHasAudio ||
+    !Number.isFinite(pts)
+  ) {
+    return false;
+  }
+  const audioClock = predictedAudioClock();
+  if (!Number.isFinite(audioClock)) {
+    return false;
+  }
+  const audioLead = audioClock - pts;
+  return (
+    audioLead > VIDEO_AUDIO_SYNC_SKIP_LATE_SECONDS &&
+    audioLead <= VIDEO_AUDIO_SYNC_MAX_DELAY_SECONDS
+  );
+};
+
+const audioSyncedDelayMs = (pts) => {
+  if (
+    inPostSeekAudioSyncGrace() ||
+    !state.mediaHasAudio ||
+    !Number.isFinite(pts)
+  ) {
+    return null;
+  }
+  const audioClock = predictedAudioClock();
+  if (!Number.isFinite(audioClock)) {
+    return null;
+  }
+  const delta = pts - audioClock;
+  if (delta < 0 || delta > VIDEO_AUDIO_SYNC_MAX_DELAY_SECONDS) {
+    return null;
+  }
+  return Math.max(0, (delta / (state.playbackSpeed || 1.0)) * 1000);
+};
+
+const scheduleNextAudio = (delayMs) => {
+  stopAudioDecodeLoop();
+  state.audioDecodeTimer = setTimeout(audioDecodeTick, delayMs);
+};
+
+const startAudioDecodeLoop = (delayMs = 0) => {
+  if (!state.playing || !state.separateAudio || !state.audioCtx) {
+    return;
+  }
+  if (state.audioDecodeTimer) {
+    return;
+  }
+  scheduleNextAudio(delayMs);
+};
+
+const fallbackToMainAudio = (reason) => {
+  if (reason) {
+    postLog(reason);
+  }
+  if (state.api?.setAudioEnabled && state.ctx) {
+    state.api.setAudioEnabled(state.ctx, 1);
+  }
+  destroyAudioDecoder();
+  postMessage({ type: "audioClear" });
+  emitStreams();
+};
+
+const separateAudioLeadSeconds = () => {
+  if (!state.mediaHasVideo || !Number.isFinite(state.lastSeparateAudioPts)) {
+    return 0;
+  }
+  const anchor =
+    state.seeking && Number.isFinite(state.seekTarget)
+      ? state.seekTarget
+      : Number.isFinite(state.currentTime)
+        ? state.currentTime
+        : 0;
+  return state.lastSeparateAudioPts - anchor;
+};
+
+const audioDecodeTick = () => {
+  state.audioDecodeTimer = null;
+  const token = state.sessionToken;
+  if (!state.playing || !state.separateAudio || !state.audioCtx) {
+    return;
+  }
+
+  const buffered = state.audioSync?.bufferedSeconds;
+  if (
+    Number.isFinite(buffered) &&
+    buffered > SEPARATE_AUDIO_MAX_BUFFER_SECONDS
+  ) {
+    scheduleNextAudio(SEPARATE_AUDIO_WAIT_DELAY_MS);
+    return;
+  }
+
+  if (separateAudioLeadSeconds() > SEPARATE_AUDIO_MAX_BUFFER_SECONDS) {
+    scheduleNextAudio(SEPARATE_AUDIO_WAIT_DELAY_MS);
+    return;
+  }
+
+  const start = performance.now();
+  while (performance.now() - start < 6) {
+    if (token !== state.sessionToken) {
+      return;
+    }
+
+    if (separateAudioLeadSeconds() > SEPARATE_AUDIO_MAX_BUFFER_SECONDS) {
+      scheduleNextAudio(SEPARATE_AUDIO_WAIT_DELAY_MS);
+      return;
+    }
+
+    const result = state.api.readFrame(state.audioCtx);
+    state.lastAudioDecodeResult = result;
+
+    if (result === 2) {
+      const audioFrame = readAudioFramePayload(state.audioCtx);
+      if (Number.isFinite(audioFrame?.pts)) {
+        state.lastSeparateAudioPts = audioFrame.pts;
+      }
+      if (
+        state.seeking &&
+        state.seekTarget !== null &&
+        Number.isFinite(audioFrame?.pts) &&
+        audioFrame.pts < state.seekTarget - SEEK_AUDIO_PREROLL_SECONDS
+      ) {
+        continue;
+      }
+      postAudioFrame(audioFrame);
+      emitStats();
+      continue;
+    }
+
+    if (result === 1) {
+      continue;
+    }
+
+    if (result === 0) {
+      scheduleNextAudio(SEPARATE_AUDIO_WAIT_DELAY_MS);
+      return;
+    }
+
+    if (result === -1) {
+      postLog("Separate audio context reached end of stream.");
+      emitStats(true);
+      return;
+    }
+
+    const detail = errorText(result);
+    fallbackToMainAudio(
+      `Separate audio decode error: ${result}${detail ? ` (${detail})` : ""}; falling back to main decoder audio.`,
+    );
+    emitStats(true);
+    return;
+  }
+
+  scheduleNextAudio(SEPARATE_AUDIO_REFILL_DELAY_MS);
 };
 
 const scheduleNext = (delayMs) => {
@@ -1206,7 +1638,7 @@ const decodeTick = () => {
     return;
   }
 
-  const budgetMs = state.seeking ? 4 : 8;
+  const budgetMs = state.seeking ? 14 : 8;
   const start = performance.now();
   while (performance.now() - start < budgetMs) {
     if (token !== state.sessionToken) {
@@ -1216,9 +1648,34 @@ const decodeTick = () => {
     const result = state.api.readFrame(state.ctx);
     state.lastDecodeResult = result;
     if (result === 2) {
-      const audioPts = !state.seeking ? handleAudioFrame() : null;
-      if (!state.seeking) {
+      if (state.separateAudio) {
+        continue;
+      }
+      const audioFrame = readAudioFramePayload();
+      const audioPts = audioFrame?.pts ?? null;
+      if (state.seeking) {
+        if (state.mediaHasVideo) {
+          queueSeekAudioFrame(audioFrame);
+        } else if (
+          Number.isFinite(audioPts) &&
+          (state.seekTarget === null || audioPts >= state.seekTarget)
+        ) {
+          state.seeking = false;
+          state.seekTarget = null;
+          state.basePts = null;
+          state.baseWall = 0;
+          postMessage({ type: "audioClear", hold: true });
+          postMessage({ type: "seekSettled", pts: audioPts });
+          postAudioFrame(audioFrame);
+          postStatus("Playing");
+          emitStats(true);
+        }
+      } else {
+        postAudioFrame(audioFrame);
         emitStats();
+      }
+      if (state.seeking) {
+        continue;
       }
       if (!state.mediaHasVideo && Number.isFinite(audioPts)) {
         if (state.basePts === null) {
@@ -1280,10 +1737,6 @@ const decodeTick = () => {
           state.seekUiLast = now;
           emitStats(true);
         }
-        if (now - state.seekPreviewLast > 250) {
-          state.seekPreviewLast = now;
-          renderFrame();
-        }
         continue;
       }
 
@@ -1297,15 +1750,17 @@ const decodeTick = () => {
         state.basePts = null;
         state.baseWall = 0;
         state.maxBufferBytes = DEFAULT_MAX_BUFFER_BYTES;
+        state.seekSettledAt = performance.now();
         postStatus("Playing");
-        // Clear any stale audio before re-enabling
-        postMessage({ type: "audioClear" });
-        if (
-          state.api.setAudioEnabled &&
-          hasExport("ffmpeg_wasm_set_audio_enabled")
-        ) {
-          state.api.setAudioEnabled(state.ctx, 1);
+        if (!state.separateAudio) {
+          postMessage({ type: "audioClear", hold: true });
         }
+        postMessage({ type: "seekSettled", pts });
+        const releasedAudio = releaseSeekAudioFrames(pts);
+        if (releasedAudio > 0) {
+          postLog(`Released ${releasedAudio} queued audio frames after seek.`);
+        }
+        startAudioDecodeLoop(0);
       }
 
       if (state.basePts === null) {
@@ -1313,12 +1768,22 @@ const decodeTick = () => {
         state.baseWall = performance.now() / 1000;
       }
 
+      if (shouldSkipLateVideoFrame(pts)) {
+        state.skippedVideoFrames += 1;
+        emitStats();
+        continue;
+      }
+
       renderFrame();
       state.frames += 1;
       emitStats();
 
       // Compact buffer periodically (every ~60 frames) to free memory
-      if (state.api.compactBuffer && state.frames % 60 === 0) {
+      if (
+        state.api.compactBuffer &&
+        state.frames % 60 === 0 &&
+        !inPostSeekAudioSyncGrace()
+      ) {
         state.api.compactBuffer(state.ctx);
       }
 
@@ -1327,7 +1792,9 @@ const decodeTick = () => {
       const elapsedVideo = pts - state.basePts;
       const targetTime = state.baseWall + elapsedVideo / speed;
       const nowSeconds = performance.now() / 1000;
-      const delayMs = Math.max(0, (targetTime - nowSeconds) * 1000);
+      const wallClockDelayMs = Math.max(0, (targetTime - nowSeconds) * 1000);
+      const audioDelayMs = audioSyncedDelayMs(pts);
+      const delayMs = audioDelayMs === null ? wallClockDelayMs : audioDelayMs;
       scheduleNext(delayMs);
       return;
     }
@@ -1343,17 +1810,14 @@ const decodeTick = () => {
       if (state.seeking) {
         state.seeking = false;
         state.seekTarget = null;
+        state.seekAudioFrames = [];
+        state.seekSettledAt = 0;
         state.maxBufferBytes = DEFAULT_MAX_BUFFER_BYTES;
-        if (
-          state.api.setAudioEnabled &&
-          hasExport("ffmpeg_wasm_set_audio_enabled")
-        ) {
-          state.api.setAudioEnabled(state.ctx, 1);
-        }
       }
 
       postLog("End of stream.");
       state.playing = false;
+      stopAudioDecodeLoop();
       postMessage({ type: "ended" });
       emitStats(true);
       return;
@@ -1362,16 +1826,20 @@ const decodeTick = () => {
     const detail = errorText(result);
     postLog(`Decode error: ${result}${detail ? ` (${detail})` : ""}`);
     state.playing = false;
+    stopAudioDecodeLoop();
     postMessage({ type: "ended" });
     emitStats(true);
     return;
   }
 
-  scheduleNext(state.seeking ? 5 : 0);
+  scheduleNext(0);
 };
 
 const startDecodeLoop = (delayMs) => {
   if (!state.playing) return;
+  if (!state.seeking) {
+    startAudioDecodeLoop(0);
+  }
   if (state.decodeTimer) return;
   scheduleNext(delayMs);
 };
@@ -1405,7 +1873,10 @@ const performSeek = (seconds) => {
   }
 
   stopDecodeLoop();
-  postMessage({ type: "audioClear" });
+  stopAudioDecodeLoop();
+  postMessage({ type: "audioClear", hold: true });
+  state.audioSync = null;
+  state.skippedVideoFrames = 0;
 
   const isBackward = target < state.currentTime;
   const ret = state.api.seek(state.ctx, target);
@@ -1450,21 +1921,33 @@ const performSeek = (seconds) => {
       startDecodeLoop(0);
       return;
     }
+
+    const resetRet = state.api.seek(state.ctx, target);
+    if (resetRet < 0) {
+      const detail = errorText(resetRet);
+      postLog(`Backward seek reset failed with code ${resetRet}${detail ? ` (${detail})` : ""}.`);
+      emitDebugSnapshot(true);
+      startDecodeLoop(0);
+      return;
+    }
+  }
+
+  if (state.separateAudio) {
+    seekSeparateAudioContext(target);
+    startAudioDecodeLoop(0);
   }
 
   // Set seeking state so decode loop fast-forwards if FFmpeg jumped to wrong keyframe
   state.seeking = true;
   state.seekTarget = target;
+  state.seekAudioFrames = [];
+  state.seekSettledAt = 0;
   state.basePts = null;
   state.baseWall = 0;
-  state.currentTime = 0;
+  state.currentTime = target;
+  state.lastSeparateAudioPts = state.separateAudio ? target : null;
   state.frames = 0;
   postStatus("Seeking...");
-
-  // Disable audio during seek fast-forward
-  if (state.api.setAudioEnabled && hasExport("ffmpeg_wasm_set_audio_enabled")) {
-    state.api.setAudioEnabled(state.ctx, 0);
-  }
 
   emitStats(true);
   startDecodeLoop(0);
@@ -1495,24 +1978,30 @@ const performSeekChapter = (chapterIndex, fallbackSeconds) => {
   }
 
   if (state.api.seekChapter && hasExport("ffmpeg_wasm_seek_chapter")) {
-    stopDecodeLoop();
-    postMessage({ type: "audioClear" });
+      stopDecodeLoop();
+      stopAudioDecodeLoop();
+      postMessage({ type: "audioClear", hold: true });
+      state.audioSync = null;
+      state.skippedVideoFrames = 0;
 
-    const ret = state.api.seekChapter(state.ctx, index);
+      const ret = state.api.seekChapter(state.ctx, index);
     if (ret >= 0) {
+      if (state.separateAudio && Number.isFinite(target)) {
+        seekSeparateAudioContext(Math.max(0, target));
+        startAudioDecodeLoop(0);
+      }
       state.seeking = true;
       state.seekTarget = Number.isFinite(target) ? Math.max(0, target) : null;
+      state.seekAudioFrames = [];
+      state.seekSettledAt = 0;
       state.basePts = null;
       state.baseWall = 0;
-      state.currentTime = 0;
+      state.currentTime = Number.isFinite(target) ? Math.max(0, target) : 0;
+      state.lastSeparateAudioPts = state.separateAudio
+        ? state.currentTime
+        : null;
       state.frames = 0;
       postStatus("Seeking chapter...");
-      if (
-        state.api.setAudioEnabled &&
-        hasExport("ffmpeg_wasm_set_audio_enabled")
-      ) {
-        state.api.setAudioEnabled(state.ctx, 0);
-      }
       emitStats(true);
       startDecodeLoop(0);
       return;
@@ -1755,7 +2244,7 @@ const startSource = async ({
 
 const initModule = async () => {
   try {
-    importScripts("ffmpeg_wasm.js");
+    importScripts(versionedAssetUrl("ffmpeg_wasm.js"));
   } catch (err) {
     postLog(`Failed to load ffmpeg_wasm.js: ${err.message}`);
     postStatus("Missing ffmpeg_wasm.js");
@@ -1771,7 +2260,7 @@ const initModule = async () => {
   postStatus("Loading FFmpeg module...");
 
   // Start loading font
-  fetch("Inter-Regular.ttf")
+  fetch(versionedAssetUrl("Inter-Regular.ttf"))
     .then((resp) => {
       if (resp.ok) return resp.arrayBuffer();
       throw new Error("Font not found");
@@ -1788,7 +2277,8 @@ const initModule = async () => {
 
   try {
     state.Module = await FFmpegWasm({
-      mainScriptUrlOrBlob: "ffmpeg_wasm.js",
+      mainScriptUrlOrBlob: versionedAssetUrl("ffmpeg_wasm.js"),
+      locateFile: (path, prefix) => versionedAssetUrl(path, prefix),
       print: (text) => postLog(text),
       printErr: (text) => postLog(text),
     });
@@ -1882,9 +2372,15 @@ onmessage = (event) => {
   } else if (msg.type === "pause") {
     state.playing = false;
     stopDecodeLoop();
+    stopAudioDecodeLoop();
     postStatus("Paused");
   } else if (msg.type === "stop") {
-    resetPlayback();
+    resetPlayback()
+      .then(() => postMessage({ type: "stopped" }))
+      .catch((err) => {
+        postLog(`Stop failed: ${err.message}`);
+        postMessage({ type: "stopped", error: err.message });
+      });
   } else if (msg.type === "seek") {
     performSeek(Number(msg.seconds) || 0);
   } else if (msg.type === "seekChapter") {
@@ -1899,8 +2395,16 @@ onmessage = (event) => {
       emitDebugSnapshot(true);
     }
   } else if (msg.type === "selectStreams") {
-    const videoStreamIndex = Number(msg.videoStreamIndex);
-    const audioStreamIndex = Number(msg.audioStreamIndex);
+    const requestedVideoStreamIndex = Number(msg.videoStreamIndex);
+    const requestedAudioStreamIndex = Number(msg.audioStreamIndex);
+    const videoStreamIndex = Number.isFinite(requestedVideoStreamIndex)
+      ? requestedVideoStreamIndex
+      : state.api.selectedVideoStream
+        ? state.api.selectedVideoStream(state.ctx)
+        : -1;
+    const audioStreamIndex = Number.isFinite(requestedAudioStreamIndex)
+      ? requestedAudioStreamIndex
+      : -1;
     if (!state.api.selectStreams) {
       postLog("Track selection API unavailable; rebuild wasm.");
       return;
@@ -1914,6 +2418,45 @@ onmessage = (event) => {
       state.pendingStreamSelection = { ...state.desiredStreamSelection };
       return;
     }
+
+    if (canUseSeparateAudioContext()) {
+      const ret = state.api.selectStreams(state.ctx, videoStreamIndex, -2);
+      if (ret < 0) {
+        postLog(`Video track selection failed (${ret}).`);
+        return;
+      }
+
+      state.desiredStreamSelection = {
+        ...(state.desiredStreamSelection || {}),
+        videoStreamIndex,
+        audioStreamIndex,
+      };
+      stopAudioDecodeLoop();
+      postMessage({ type: "audioClear" });
+
+      if (audioStreamIndex === -2) {
+        destroyAudioDecoder();
+        state.api.setAudioEnabled(state.ctx, 0);
+      } else if (!openSeparateAudioContext(audioStreamIndex, state.currentTime)) {
+        destroyAudioDecoder();
+        const fallbackRet = state.api.selectStreams(
+          state.ctx,
+          videoStreamIndex,
+          audioStreamIndex,
+        );
+        if (fallbackRet < 0) {
+          postLog(`Track selection failed (${fallbackRet}).`);
+          return;
+        }
+      }
+
+      state.basePts = null;
+      state.baseWall = 0;
+      emitStreams();
+      startAudioDecodeLoop(0);
+      return;
+    }
+
     const ret = state.api.selectStreams(
       state.ctx,
       videoStreamIndex,
@@ -1945,6 +2488,20 @@ onmessage = (event) => {
       state.basePts = state.currentTime;
     }
     postLog(`Playback speed set to ${state.playbackSpeed}x`);
+  } else if (msg.type === "audioClock") {
+    const hasClock =
+      msg.clock !== null && msg.clock !== undefined && msg.clock !== "";
+    const clock = hasClock ? Number(msg.clock) : Number.NaN;
+    state.audioSync = Number.isFinite(clock)
+      ? {
+          clock,
+          drift: Number.isFinite(Number(msg.drift)) ? Number(msg.drift) : null,
+          bufferedSeconds: Number.isFinite(Number(msg.bufferedSeconds))
+            ? Number(msg.bufferedSeconds)
+            : null,
+          wallSeconds: performance.now() / 1000,
+        }
+      : null;
   } else if (msg.type === "frameStep") {
     // Step one frame forward or backward
     frameStep(msg.direction || 1);

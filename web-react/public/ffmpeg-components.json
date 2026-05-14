@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "variant": "full",
+  "generatedAt": "2026-05-13T20:18:25.191Z",
+  "policy": {
+    "playbackOnly": true,
+    "encoders": false,
+    "muxers": false,
+    "filters": false,
+    "bitstreamFilters": [
+      "vp9_superframe_split"
+    ],
+    "devices": false,
+    "network": false,
+    "programs": false,
+    "iconv": false,
+    "runtimeCpuDetect": false
+  },
+  "enabled": {
+    "decoder": [
+      "aac",
+      "aac_latm",
+      "ac3",
+      "alac",
+      "ass",
+      "eac3",
+      "flac",
+      "h263",
+      "h264",
+      "hevc",
+      "libdav1d",
+      "mp3",
+      "mp3float",
+      "mpeg2video",
+      "mpeg4",
+      "opus",
+      "pcm_f32le",
+      "pcm_s16be",
+      "pcm_s16le",
+      "pcm_s24le",
+      "pcm_s32le",
+      "pcm_s8",
+      "pcm_u8",
+      "ssa",
+      "subrip",
+      "vorbis",
+      "vp8",
+      "vp9",
+      "webvtt"
+    ],
+    "parser": [
+      "aac",
+      "aac_latm",
+      "ac3",
+      "av1",
+      "flac",
+      "h263",
+      "h264",
+      "hevc",
+      "mpeg4video",
+      "mpegaudio",
+      "mpegvideo",
+      "opus",
+      "vorbis",
+      "vp8",
+      "vp9"
+    ],
+    "demuxer": [
+      "avi",
+      "flac",
+      "matroska",
+      "mov",
+      "mp3",
+      "mpegts",
+      "ogg",
+      "wav"
+    ],
+    "protocol": [
+      "file"
+    ],
+    "bsf": [
+      "vp9_superframe_split"
+    ],
+    "encoder": [],
+    "muxer": [],
+    "filter": [],
+    "indev": [],
+    "outdev": []
+  },
+  "errors": []
+}
