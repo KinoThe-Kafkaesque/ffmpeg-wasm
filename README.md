@@ -52,6 +52,14 @@ HTML demo:
 - Example: `node scripts/serve-web.mjs --port 8080`
 - Includes Matroska-first UI, audio worklet playback, and optional WebGL rendering.
 
+Local browser CI:
+- `npm install`
+- `npm run test:browser:install`
+- `npm run ci:browser`
+- Runs Playwright against Chromium, system Chrome, Firefox, WebKit, mobile Chromium, and mobile WebKit.
+- Generates local media fixtures under `web/__test-fixtures__/` and verifies headers, manifests, unsupported URL errors, local MKV playback, audio-only playback, seek behavior, subtitle selection, responsive layout, and browser FATE metadata/decode/seek paths.
+- See `docs/BROWSER_CI.md` for coverage details and interpretation.
+
 React demo:
 - `cd web-react`
 - `npm install`

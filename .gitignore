@@ -8,7 +8,9 @@
 /build/
 /dist/
 /out/
+/output/
 /web/dist/
+/web/__test-fixtures__/
 /*.wasm
 /*.data
 /*.mem
