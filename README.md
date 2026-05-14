@@ -64,7 +64,7 @@ Use `scripts/ffmpeg-wasm-node.mjs` to mirror wasm exports outside the browser.
 Commands:
 - `node scripts/ffmpeg-wasm-node.mjs list-exports`
 - `node scripts/ffmpeg-wasm-node.mjs smoke /path/to/video.mkv 60`
-- `node scripts/test-seek-internals.mjs /path/to/video.mkv` (builds a test wasm and validates internal seek behavior)
+- `node scripts/test-seek-internals.mjs /path/to/video.mkv [--build-dir build/ffmpeg-wasm-pthreads4]` (builds a test wasm against the selected FFmpeg build directory and validates internal seek behavior)
 - `node scripts/test-core-features.mjs /path/to/video.mkv [wasm_js] [wasm_wasm]` (runs core decode/selection/seek checks)
 - `node scripts/test-codec-regressions.mjs [wasm_js] [wasm_wasm]` (runs local HEVC read_at/seek, AV1 dav1d stack, source-FPS cadence, and native real-time throughput regressions; override fixtures with `FFMPEG_WASM_HEVC_SAMPLE` and `FFMPEG_WASM_AV1_SAMPLE`)
 - `node scripts/test-playback-performance.mjs /path/to/video.webm [wasm_js] [wasm_wasm]` (measures source FPS cadence, decode-only throughput, and decode+RGBA throughput against real-time)

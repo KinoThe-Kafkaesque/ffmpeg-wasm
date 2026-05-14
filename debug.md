@@ -22,7 +22,7 @@ Before chasing browser timing, prove native behavior in Node:
 
 ```bash
 node scripts/test-core-features.mjs /path/to/video.mkv
-node scripts/test-seek-internals.mjs /path/to/video.mkv
+node scripts/test-seek-internals.mjs /path/to/video.mkv --build-dir build/ffmpeg-wasm-pthreads4
 node scripts/test-v3-regressions.mjs build/ffmpeg-wasm-debug/ffmpeg_wasm.js build/ffmpeg-wasm-debug/ffmpeg_wasm.wasm
 ```
 
@@ -289,7 +289,7 @@ node scripts/test-core-features.mjs /path/to/video.mkv
 Seek internals harness:
 
 ```bash
-node scripts/test-seek-internals.mjs /path/to/video.mkv
+node scripts/test-seek-internals.mjs /path/to/video.mkv --build-dir build/ffmpeg-wasm-pthreads4
 ```
 
 Direct debug snapshot check:

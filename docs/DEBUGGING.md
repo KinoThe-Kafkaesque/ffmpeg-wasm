@@ -78,13 +78,15 @@ Before debugging browser timing, prove the native behavior in Node:
 node scripts/test-core-features.mjs /path/to/video.mkv
 node scripts/test-codec-regressions.mjs
 node scripts/test-playback-performance.mjs /path/to/video.webm
-node scripts/test-seek-internals.mjs /path/to/video.mkv
+node scripts/test-seek-internals.mjs /path/to/video.mkv --build-dir build/ffmpeg-wasm-pthreads4
 node scripts/test-v3-regressions.mjs build/ffmpeg-wasm-debug/ffmpeg_wasm.js build/ffmpeg-wasm-debug/ffmpeg_wasm.wasm
 ```
 
 The Node harness and browser worker both bind through `web/ffmpeg-wasm-api.js`, so an export added there is available to both surfaces.
 
 `test-codec-regressions.mjs` auto-detects local AV1/HEVC samples under `/home/nyanpasu/Desktop/animus`. It uses `ffprobe` frame-rate metadata when available, checks decoded PTS cadence against that FPS, and asserts native decode throughput is at least real-time. Set `FFMPEG_WASM_AV1_SAMPLE`, `FFMPEG_WASM_HEVC_SAMPLE`, or `FFMPEG_WASM_SAMPLE_ROOT` when testing another machine or fixture folder. Use `FFMPEG_WASM_FPS_TOLERANCE`, `FFMPEG_WASM_REALTIME_HEADROOM`, or `FFMPEG_WASM_REQUIRE_REALTIME=0` only for explicit perf experiments.
+
+`test-seek-internals.mjs` builds a small test-only WASM wrapper against `build/ffmpeg-wasm-pthreads4` when that full release build exists, otherwise it falls back to `build/ffmpeg-wasm`. Override with `--build-dir` or `FFMPEG_WASM_BUILD_DIR` when checking another variant.
 
 `test-playback-performance.mjs` is the generic perf gate for a named file. It runs two passes: decode-only and decode+RGBA conversion. The second pass is closer to browser canvas playback cost. Use `FFMPEG_WASM_PERF_REPORT_ONLY=1` when you want measurements without failing the command.
 
