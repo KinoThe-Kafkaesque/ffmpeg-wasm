@@ -10,171 +10,12 @@ const require = createRequire(import.meta.url);
 const ROOT_DIR = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_JS_PATH = resolve(ROOT_DIR, "web/ffmpeg_wasm.js");
 const DEFAULT_WASM_PATH = resolve(ROOT_DIR, "web/ffmpeg_wasm.wasm");
+const { createFfmpegWasmApi } = require(resolve(
+  ROOT_DIR,
+  "web/ffmpeg-wasm-api.js",
+));
 const FFMPEG_WASM_IO_APPEND_STREAM = 0;
 const FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL = 1;
-
-const API_SPEC = {
-  avcodecVersion: ["ffmpeg_wasm_avcodec_version", "number", []],
-  avformatVersion: ["ffmpeg_wasm_avformat_version", "number", []],
-  avutilVersion: ["ffmpeg_wasm_avutil_version", "number", []],
-  hasHevcAv1: ["ffmpeg_wasm_has_hevc_av1", "number", []],
-
-  create: ["ffmpeg_wasm_create", "number", ["number"]],
-  destroy: ["ffmpeg_wasm_destroy", null, ["number"]],
-  append: ["ffmpeg_wasm_append", "number", ["number", "number", "number"]],
-  setEof: ["ffmpeg_wasm_set_eof", null, ["number"]],
-  setKeepAll: ["ffmpeg_wasm_set_keep_all", null, ["number", "number"]],
-  setBufferLimit: ["ffmpeg_wasm_set_buffer_limit", null, ["number", "number"]],
-  setFileSize: ["ffmpeg_wasm_set_file_size", null, ["number", "number"]],
-  setBufferOffset: ["ffmpeg_wasm_set_buffer_offset", null, ["number", "number"]],
-  setIoMode: ["ffmpeg_wasm_set_io_mode", "number", ["number", "number"]],
-  getIoMode: ["ffmpeg_wasm_get_io_mode", "number", ["number"]],
-  setCacheLimit: ["ffmpeg_wasm_set_cache_limit", null, ["number", "number"]],
-  setAudioEnabled: ["ffmpeg_wasm_set_audio_enabled", null, ["number", "number"]],
-
-  open: ["ffmpeg_wasm_open", "number", ["number", "string"]],
-  duration: ["ffmpeg_wasm_duration_seconds", "number", ["number"]],
-  seek: ["ffmpeg_wasm_seek_seconds", "number", ["number", "number"]],
-  chaptersCount: ["ffmpeg_wasm_chapters_count", "number", ["number"]],
-  hasOrderedChapters: ["ffmpeg_wasm_has_ordered_chapters", "number", ["number"]],
-  chapterStartSeconds: [
-    "ffmpeg_wasm_chapter_start_seconds",
-    "number",
-    ["number", "number"],
-  ],
-  chapterEndSeconds: [
-    "ffmpeg_wasm_chapter_end_seconds",
-    "number",
-    ["number", "number"],
-  ],
-  chapterTitle: ["ffmpeg_wasm_chapter_title", "string", ["number", "number"]],
-  chapterId: ["ffmpeg_wasm_chapter_id", "number", ["number", "number"]],
-  seekChapter: ["ffmpeg_wasm_seek_chapter", "number", ["number", "number"]],
-  prepareRestream: [
-    "ffmpeg_wasm_prepare_restream",
-    "number",
-    ["number", "number"],
-  ],
-  readFrame: ["ffmpeg_wasm_read_frame", "number", ["number"]],
-  readVideoFrame: ["ffmpeg_wasm_read_video_frame", "number", ["number"]],
-
-  width: ["ffmpeg_wasm_video_width", "number", ["number"]],
-  height: ["ffmpeg_wasm_video_height", "number", ["number"]],
-  frameFormat: ["ffmpeg_wasm_frame_format", "number", ["number"]],
-  frameDataPtr: ["ffmpeg_wasm_frame_data_ptr", "number", ["number", "number"]],
-  frameLinesize: [
-    "ffmpeg_wasm_frame_linesize",
-    "number",
-    ["number", "number"],
-  ],
-  pts: ["ffmpeg_wasm_frame_pts_seconds", "number", ["number"]],
-
-  toRgba: ["ffmpeg_wasm_frame_to_rgba", "number", ["number"]],
-  rgbaPtr: ["ffmpeg_wasm_rgba_ptr", "number", ["number"]],
-  rgbaStride: ["ffmpeg_wasm_rgba_stride", "number", ["number"]],
-  rgbaSize: ["ffmpeg_wasm_rgba_size", "number", ["number"]],
-
-  audioChannels: ["ffmpeg_wasm_audio_channels", "number", ["number"]],
-  audioSampleRate: ["ffmpeg_wasm_audio_sample_rate", "number", ["number"]],
-  audioSamples: ["ffmpeg_wasm_audio_nb_samples", "number", ["number"]],
-  audioPtr: ["ffmpeg_wasm_audio_ptr", "number", ["number"]],
-  audioBytes: ["ffmpeg_wasm_audio_bytes", "number", ["number"]],
-  audioPts: ["ffmpeg_wasm_audio_pts_seconds", "number", ["number"]],
-
-  bufferedBytes: ["ffmpeg_wasm_buffered_bytes", "number", ["number"]],
-  compactBuffer: ["ffmpeg_wasm_compact_buffer", null, ["number"]],
-
-  streamsCount: ["ffmpeg_wasm_streams_count", "number", ["number"]],
-  streamMediaType: [
-    "ffmpeg_wasm_stream_media_type",
-    "number",
-    ["number", "number"],
-  ],
-  streamCodecId: ["ffmpeg_wasm_stream_codec_id", "number", ["number", "number"]],
-  streamCodecName: [
-    "ffmpeg_wasm_stream_codec_name",
-    "string",
-    ["number", "number"],
-  ],
-  streamLanguage: ["ffmpeg_wasm_stream_language", "string", ["number", "number"]],
-  streamTitle: ["ffmpeg_wasm_stream_title", "string", ["number", "number"]],
-  streamIsDefault: [
-    "ffmpeg_wasm_stream_is_default",
-    "number",
-    ["number", "number"],
-  ],
-  attachmentsCount: ["ffmpeg_wasm_attachments_count", "number", ["number"]],
-  attachmentName: ["ffmpeg_wasm_attachment_name", "string", ["number", "number"]],
-  attachmentMimeType: [
-    "ffmpeg_wasm_attachment_mime_type",
-    "string",
-    ["number", "number"],
-  ],
-  attachmentSize: ["ffmpeg_wasm_attachment_size", "number", ["number", "number"]],
-  attachmentDataPtr: [
-    "ffmpeg_wasm_attachment_data_ptr",
-    "number",
-    ["number", "number"],
-  ],
-
-  selectedVideoStream: [
-    "ffmpeg_wasm_selected_video_stream",
-    "number",
-    ["number"],
-  ],
-  selectedAudioStream: [
-    "ffmpeg_wasm_selected_audio_stream",
-    "number",
-    ["number"],
-  ],
-  audioIsEnabled: ["ffmpeg_wasm_audio_is_enabled", "number", ["number"]],
-  selectStreams: [
-    "ffmpeg_wasm_select_streams",
-    "number",
-    ["number", "number", "number"],
-  ],
-
-  selectedSubtitleStream: [
-    "ffmpeg_wasm_selected_subtitle_stream",
-    "number",
-    ["number"],
-  ],
-  subtitlesEnabled: ["ffmpeg_wasm_subtitles_enabled", "number", ["number"]],
-  selectSubtitleStream: [
-    "ffmpeg_wasm_select_subtitle_stream",
-    "number",
-    ["number", "number"],
-  ],
-  addFont: ["ffmpeg_wasm_add_font", "number", ["number", "string", "number", "number"]],
-  renderSubtitles: ["ffmpeg_wasm_render_subtitles", "number", ["number", "number"]],
-  subtitleEventsCount: ["ffmpeg_wasm_subtitle_events_count", "number", ["number"]],
-  subtitleFirstStartMs: [
-    "ffmpeg_wasm_subtitle_first_start_ms",
-    "number",
-    ["number"],
-  ],
-  subtitleFirstEndMs: ["ffmpeg_wasm_subtitle_first_end_ms", "number", ["number"]],
-  clearSubtitleTrack: ["ffmpeg_wasm_clear_subtitle_track", null, ["number"]],
-
-  // Test-only debug exports (available when built with FFMPEG_WASM_TESTING=1)
-  debugSeekStream: [
-    "ffmpeg_wasm_debug_seek_stream",
-    "number",
-    ["number", "number", "number"],
-  ],
-  debugBufferOffset: [
-    "ffmpeg_wasm_debug_buffer_offset",
-    "number",
-    ["number"],
-  ],
-  debugBufferSize: ["ffmpeg_wasm_debug_buffer_size", "number", ["number"]],
-  debugBufferReadPos: [
-    "ffmpeg_wasm_debug_buffer_read_pos",
-    "number",
-    ["number"],
-  ],
-  debugBytePos: ["ffmpeg_wasm_debug_byte_pos", "number", ["number"]],
-};
 
 const toUint8Array = (value) => {
   if (value instanceof Uint8Array) return value;
@@ -188,11 +29,6 @@ const toUint8Array = (value) => {
   throw new TypeError("Expected Uint8Array, Buffer, ArrayBuffer, or TypedArray");
 };
 
-const hasExport = (Module, name) => typeof Module[`_${name}`] === "function";
-
-const cwrapMaybe = (Module, name, returnType, argTypes) =>
-  hasExport(Module, name) ? Module.cwrap(name, returnType, argTypes) : null;
-
 const createRawApi = (Module) => {
   const raw = {};
   for (const key of Object.keys(Module)) {
@@ -201,14 +37,6 @@ const createRawApi = (Module) => {
     raw[name] = Module[key];
   }
   return raw;
-};
-
-const createApi = (Module) => {
-  const api = {};
-  for (const [method, [cName, returnType, argTypes]] of Object.entries(API_SPEC)) {
-    api[method] = cwrapMaybe(Module, cName, returnType, argTypes);
-  }
-  return api;
 };
 
 export const loadWasmNode = async (options = {}) => {
@@ -224,7 +52,7 @@ export const loadWasmNode = async (options = {}) => {
     printErr: options.printErr || (() => {}),
   });
 
-  const api = createApi(Module);
+  const api = createFfmpegWasmApi(Module);
   const raw = createRawApi(Module);
   let readAtFd = null;
   let readAtSize = -1;

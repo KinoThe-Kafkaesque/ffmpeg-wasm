@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <radialGradient id="goldGlow" cx="36%" cy="45%" r="58%">
+      <stop offset="0" stop-color="#E6B450" stop-opacity="0.28"/>
+      <stop offset="0.46" stop-color="#7B5EA7" stop-opacity="0.11"/>
+      <stop offset="1" stop-color="#0B0C0F" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B0C0F"/>
+      <stop offset="0.68" stop-color="#12141A"/>
+      <stop offset="1" stop-color="#06070A"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="22" stdDeviation="30" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#goldGlow)"/>
+  <g opacity="0.18">
+    <path d="M0 112H1200M0 236H1200M0 360H1200M0 484H1200" stroke="#A8B4C0" stroke-width="1"/>
+    <path d="M130 0V630M322 0V630M514 0V630M706 0V630M898 0V630M1090 0V630" stroke="#A8B4C0" stroke-width="1"/>
+  </g>
+
+  <g transform="translate(116 108)" filter="url(#softShadow)">
+    <rect x="0" y="0" width="968" height="414" rx="26" fill="#16181D" stroke="#A8B4C0" stroke-opacity="0.2"/>
+    <rect x="42" y="48" width="884" height="264" rx="16" fill="#08090C" stroke="#A8B4C0" stroke-opacity="0.16"/>
+    <path d="M42 312H926" stroke="#E6B450" stroke-width="6" stroke-linecap="round"/>
+    <circle cx="155" cy="180" r="78" fill="none" stroke="#A8B4C0" stroke-width="7" stroke-opacity="0.82"/>
+    <circle cx="181" cy="162" r="54" fill="#08090C" stroke="#1F2229" stroke-width="7"/>
+    <path d="M220 117A78 78 0 0 1 211 242A54 54 0 0 0 220 117Z" fill="#E6B450"/>
+    <circle cx="142" cy="195" r="10" fill="#7B5EA7"/>
+    <text x="278" y="168" fill="#EEF2F6" font-family="Inter, Arial, sans-serif" font-size="82" font-weight="700">Parallax</text>
+    <text x="282" y="224" fill="#E6B450" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" letter-spacing="4">MKV PLAYER</text>
+    <text x="282" y="274" fill="#A8B4C0" font-family="Inter, Arial, sans-serif" font-size="25">Private browser playback for local files and direct streams.</text>
+    <text x="42" y="370" fill="#A8B4C0" font-family="Inter, Arial, sans-serif" font-size="22">FFmpeg WASM | MKV | MP4 | WebM | subtitles | multi-track audio</text>
+  </g>
+</svg>

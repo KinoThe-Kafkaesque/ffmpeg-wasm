@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>Browser FATE Runner</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f7f8fa;
+        --panel: #ffffff;
+        --text: #1d252d;
+        --muted: #657080;
+        --line: #d9dee7;
+        --pass: #157a3a;
+        --fail: #b42318;
+        --skip: #785900;
+        --run: #2357a4;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      aside {
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+        padding: 18px;
+      }
+
+      section {
+        min-width: 0;
+        padding: 18px;
+      }
+
+      h1 {
+        margin: 0 0 16px;
+        font-size: 22px;
+        line-height: 1.15;
+      }
+
+      h2 {
+        margin: 20px 0 10px;
+        font-size: 13px;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 12px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      input,
+      select,
+      button {
+        min-height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--text);
+        font: inherit;
+      }
+
+      input,
+      select {
+        width: 100%;
+        padding: 0 10px;
+      }
+
+      input[type="checkbox"] {
+        width: auto;
+        min-height: 0;
+        margin-right: 6px;
+        vertical-align: middle;
+      }
+
+      button {
+        padding: 0 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button.primary {
+        border-color: #174a91;
+        background: #1f5fb7;
+        color: #fff;
+      }
+
+      button.danger {
+        border-color: #b42318;
+        color: #b42318;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
+
+      .actions,
+      .chips,
+      .stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .chip {
+        min-height: 30px;
+        padding: 0 10px;
+        border-color: #c7d2e2;
+        background: #eef4fb;
+        color: #1f4c7a;
+        font-size: 12px;
+      }
+
+      .stat {
+        min-width: 76px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+      }
+
+      .stat strong {
+        display: block;
+        font-size: 20px;
+        line-height: 1;
+      }
+
+      .stat span {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      canvas {
+        width: 100%;
+        max-height: 230px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #101820;
+        object-fit: contain;
+      }
+
+      .table-wrap {
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+      }
+
+      table {
+        width: 100%;
+        min-width: 860px;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      th,
+      td {
+        padding: 9px 10px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+        font-size: 12px;
+      }
+
+      th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: #f0f3f7;
+        color: var(--muted);
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      code {
+        overflow-wrap: anywhere;
+        font-family:
+          "SFMono-Regular",
+          Consolas,
+          "Liberation Mono",
+          monospace;
+      }
+
+      .status {
+        display: inline-flex;
+        min-width: 58px;
+        justify-content: center;
+        border-radius: 999px;
+        padding: 3px 8px;
+        background: #eef1f5;
+        color: var(--muted);
+        font-weight: 800;
+      }
+
+      .status.pass {
+        background: #e7f6eb;
+        color: var(--pass);
+      }
+
+      .status.fail {
+        background: #fdeceb;
+        color: var(--fail);
+      }
+
+      .status.skip {
+        background: #fff6d6;
+        color: var(--skip);
+      }
+
+      .status.run {
+        background: #e7effc;
+        color: var(--run);
+      }
+
+      .log {
+        height: 170px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #101820;
+        color: #d8e7ef;
+        padding: 10px;
+        white-space: pre-wrap;
+        font-family:
+          "SFMono-Regular",
+          Consolas,
+          "Liberation Mono",
+          monospace;
+        font-size: 12px;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      @media (max-width: 900px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+
+        aside {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <aside>
+        <h1>Browser FATE Runner</h1>
+
+        <label>
+          Sample base
+          <input id="sampleBase" value="/fate-suite/" />
+        </label>
+
+        <label>
+          Tag
+          <select id="tagFilter"></select>
+        </label>
+
+        <div class="chips">
+          <button class="chip" type="button" data-tag="browser-smoke">Smoke</button>
+          <button class="chip" type="button" data-tag="av1">AV1</button>
+          <button class="chip" type="button" data-tag="hevc">HEVC</button>
+          <button class="chip" type="button" data-tag="">All</button>
+        </div>
+
+        <h2>Selection</h2>
+
+        <label>
+          Profile
+          <select id="profileFilter"></select>
+        </label>
+
+        <label>
+          Search
+          <input id="searchFilter" placeholder="case, sample, source" />
+        </label>
+
+        <label>
+          Max cases
+          <input id="maxCases" type="number" min="1" max="2000" value="40" />
+        </label>
+
+        <label>
+          <span>
+            <input id="includeSkips" type="checkbox" />
+            Include mapped skips
+          </span>
+        </label>
+
+        <div class="actions">
+          <button id="runButton" class="primary" type="button">Run</button>
+          <button id="stopButton" class="danger" type="button" disabled>Stop</button>
+        </div>
+
+        <h2>Frame Preview</h2>
+        <canvas id="preview" width="320" height="180"></canvas>
+
+        <h2>Log</h2>
+        <div id="log" class="log"></div>
+      </aside>
+
+      <section>
+        <div class="stats">
+          <div class="stat"><strong id="totalCount">0</strong><span>Total</span></div>
+          <div class="stat"><strong id="selectedCount">0</strong><span>Selected</span></div>
+          <div class="stat"><strong id="passCount">0</strong><span>Pass</span></div>
+          <div class="stat"><strong id="failCount">0</strong><span>Fail</span></div>
+          <div class="stat"><strong id="skipCount">0</strong><span>Skip</span></div>
+        </div>
+
+        <h2>Cases</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 96px">Status</th>
+                <th style="width: 250px">Case</th>
+                <th style="width: 260px">Sample</th>
+                <th style="width: 96px">Profile</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody id="caseRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="ffmpeg_wasm.js"></script>
+    <script src="ffmpeg-wasm-api.js"></script>
+    <script src="fate-browser-manifest.js"></script>
+    <script src="fate-browser-runner.js"></script>
+    <script>
+      const manifest = window.FATE_BROWSER_MANIFEST;
+      const rowsEl = document.getElementById("caseRows");
+      const logEl = document.getElementById("log");
+      const tagFilter = document.getElementById("tagFilter");
+      const profileFilter = document.getElementById("profileFilter");
+      const searchFilter = document.getElementById("searchFilter");
+      const maxCases = document.getElementById("maxCases");
+      const includeSkips = document.getElementById("includeSkips");
+      const sampleBase = document.getElementById("sampleBase");
+      const runButton = document.getElementById("runButton");
+      const stopButton = document.getElementById("stopButton");
+      const preview = document.getElementById("preview");
+      const counters = {
+        total: document.getElementById("totalCount"),
+        selected: document.getElementById("selectedCount"),
+        pass: document.getElementById("passCount"),
+        fail: document.getElementById("failCount"),
+        skip: document.getElementById("skipCount"),
+      };
+
+      let selectedCases = [];
+      let currentRun = null;
+      let stats = { pass: 0, fail: 0, skip: 0 };
+
+      const setCounter = (name, value) => {
+        counters[name].textContent = String(value);
+      };
+
+      const log = (message) => {
+        const time = new Date().toLocaleTimeString();
+        logEl.textContent += `[${time}] ${message}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+
+      const setStatus = (row, status, result = "") => {
+        const pill = row.querySelector(".status");
+        pill.className = `status ${status}`;
+        pill.textContent = status;
+        row.querySelector("[data-result]").innerHTML = result;
+      };
+
+      const renderOptions = () => {
+        tagFilter.innerHTML = [
+          '<option value="browser-smoke">browser-smoke</option>',
+          '<option value="">all tags</option>',
+          ...manifest.tags
+            .filter((tag) => tag !== "browser-smoke")
+            .map((tag) => `<option value="${tag}">${tag}</option>`),
+        ].join("");
+
+        profileFilter.innerHTML = [
+          '<option value="">all profiles</option>',
+          ...manifest.profiles.map((profile) => `<option value="${profile}">${profile}</option>`),
+        ].join("");
+      };
+
+      const caseMatches = (testCase) => {
+        const tag = tagFilter.value;
+        const profile = profileFilter.value;
+        const query = searchFilter.value.trim().toLowerCase();
+        if (tag && !testCase.tags.includes(tag)) return false;
+        if (profile && testCase.profile !== profile) return false;
+        if (!includeSkips.checked && testCase.skipReason) return false;
+        if (!query) return true;
+        return `${testCase.id} ${testCase.sample} ${testCase.source} ${testCase.tags.join(" ")}`
+          .toLowerCase()
+          .includes(query);
+      };
+
+      const renderCases = () => {
+        const limit = Math.max(1, Math.min(2000, Number(maxCases.value) || 40));
+        selectedCases = manifest.cases.filter(caseMatches).slice(0, limit);
+        rowsEl.innerHTML = selectedCases
+          .map(
+            (testCase, index) => `
+              <tr data-index="${index}">
+                <td><span class="status">idle</span></td>
+                <td><code>${testCase.id}</code><div class="muted">${testCase.tags.join(", ")}</div></td>
+                <td><code>${testCase.sample}</code><div class="muted">${testCase.source}</div></td>
+                <td>${testCase.profile}</td>
+                <td data-result class="muted">${testCase.formatHint || "auto"}</td>
+              </tr>
+            `
+          )
+          .join("");
+        setCounter("total", manifest.cases.length);
+        setCounter("selected", selectedCases.length);
+      };
+
+      const resetStats = () => {
+        stats = { pass: 0, fail: 0, skip: 0 };
+        setCounter("pass", 0);
+        setCounter("fail", 0);
+        setCounter("skip", 0);
+      };
+
+      const formatResult = (result) => {
+        if (result.status === "skip") {
+          return result.reason || "skipped";
+        }
+        const summary = result.summary || {};
+        const decoded = summary.decoded || {};
+        const parts = [
+          `${Math.round(result.elapsedMs || 0)} ms`,
+          `${summary.streams || 0} streams`,
+          `${summary.videoStreams || 0}v/${summary.audioStreams || 0}a`,
+        ];
+        if (decoded.video || decoded.audio) {
+          parts.push(`${decoded.video || 0} video frames`);
+          parts.push(`${decoded.audio || 0} audio frames`);
+        }
+        if (summary.seeks) {
+          parts.push(`${summary.seeks.length} seeks`);
+        }
+        return parts.join(" | ");
+      };
+
+      const runSelected = async () => {
+        resetStats();
+        runButton.disabled = true;
+        stopButton.disabled = false;
+        currentRun = new AbortController();
+
+        const runner = new FateBrowserRunner({
+          sampleBase: sampleBase.value.trim() || "/fate-suite/",
+          previewCanvas: preview,
+          onLog: (message) => {
+            if (message) log(message);
+          },
+        });
+
+        try {
+          log(`loading wasm`);
+          await runner.loadWasm();
+          log(`running ${selectedCases.length} cases`);
+
+          for (let index = 0; index < selectedCases.length; index += 1) {
+            currentRun.signal.throwIfAborted();
+            const testCase = selectedCases[index];
+            const row = rowsEl.querySelector(`[data-index="${index}"]`);
+            setStatus(row, "run", "running");
+            log(`${testCase.id}`);
+
+            try {
+              const result = await runner.runCase(testCase, {
+                signal: currentRun.signal,
+                includeMappedSkips: includeSkips.checked,
+              });
+              stats[result.status] += 1;
+              setCounter(result.status, stats[result.status]);
+              setStatus(row, result.status, formatResult(result));
+            } catch (err) {
+              stats.fail += 1;
+              setCounter("fail", stats.fail);
+              setStatus(row, "fail", `<code>${String(err && err.message ? err.message : err)}</code>`);
+            }
+          }
+
+          log("done");
+        } catch (err) {
+          if (err.name === "AbortError") {
+            log("stopped");
+          } else {
+            log(String(err && err.stack ? err.stack : err));
+          }
+        } finally {
+          currentRun = null;
+          runButton.disabled = false;
+          stopButton.disabled = true;
+        }
+      };
+
+      renderOptions();
+      renderCases();
+
+      for (const input of [tagFilter, profileFilter, searchFilter, maxCases, includeSkips]) {
+        input.addEventListener("input", renderCases);
+        input.addEventListener("change", renderCases);
+      }
+
+      document.querySelectorAll("[data-tag]").forEach((button) => {
+        button.addEventListener("click", () => {
+          tagFilter.value = button.dataset.tag;
+          renderCases();
+        });
+      });
+
+      runButton.addEventListener("click", runSelected);
+      stopButton.addEventListener("click", () => currentRun?.abort());
+    </script>
+  </body>
+</html>

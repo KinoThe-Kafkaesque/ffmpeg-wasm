@@ -1,4 +1,4 @@
-# FFmpeg WASM Player v2 - Feature Documentation
+# FFmpeg WASM Player v3 - Feature Documentation
 
 ## Keyboard Shortcuts
 
@@ -65,11 +65,11 @@ Available speeds: 0.25x, 0.5x, 0.75x, 1x, 1.25x, 1.5x, 1.75x, 2x
 
 ### Source Panel
 - **Local File**: Select MKV/MP4/WebM files from disk
-- **Stream URL**: Enter direct video URL (requires CORS)
+- **Stream URL**: Enter direct media URL (requires CORS; HTTP Range support enables seeking)
 - **Start Playback**: Begin playing selected source
 
 ### Settings Panel
-- **Container Hint**: Auto / MP4 / Matroska format detection
+- **Container Detection**: Automatic extension detection with local magic-byte probing
 - **Render Mode**: Canvas 2D or WebGL
 - **Video Track**: Select video stream
 - **Audio Track**: Select audio stream or disable
@@ -114,7 +114,13 @@ Available speeds: 0.25x, 0.5x, 0.75x, 1x, 1.25x, 1.5x, 1.75x, 2x
 - **Buffered**: Data buffered in memory
 - **PTS**: Current presentation timestamp
 - **Audio Format**: Sample rate / channels
-- **Audio Clock**: Audio playback position
+- **Source**: File or URL mode and size
+- **Container**: Detected FFmpeg input format
+- **Seek**: read_at, HTTP Range read_at, or append-stream status
+- **Audio Queue**: Worklet buffer and pending chunks
+- **Audio Drops**: Dropped samples and underrun frames
+- **Tracks**: Video/audio/subtitle stream counts
+- **Subtitles**: Active subtitle track status
 
 ---
 
@@ -135,7 +141,8 @@ Visual feedback appears center-screen for:
 
 - **Screenshot**: Saves as PNG with timestamp filename
 - **Frame stepping**: Forward works reliably; backward is limited due to streaming architecture
-- **Subtitle support**: Track selection UI ready; actual rendering requires WASM subtitle decoder
+- **Subtitle support**: Track selection, fallback font injection, ASS/SSA rendering, and generated fixture coverage are wired
 - **Audio delay**: Shifts audio timing relative to video
+- **Audio-only playback**: MP3/FLAC/OGG/WAV-style files use audio timing and an audio-only placeholder
 - **Video filters**: Applied via CSS, works on container element
 - **A-B Loop**: Automatically seeks back to start point when end is reached

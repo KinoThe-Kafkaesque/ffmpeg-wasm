@@ -23,6 +23,16 @@ const formatTime = (seconds) => {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 };
 
+const formatDebugValue = (value, digits = 2) => {
+  if (value === null || value === undefined) return "-";
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "-";
+    return Number.isInteger(value) ? String(value) : value.toFixed(digits);
+  }
+  return String(value);
+};
+
 function App() {
   const [status, setStatus] = useState("Initializing worker...");
   const [logText, setLogText] = useState("");
@@ -52,6 +62,13 @@ function App() {
   const [hasOrderedChapters, setHasOrderedChapters] = useState(false);
   const [selectedChapter, setSelectedChapter] = useState("");
   const [attachments, setAttachments] = useState([]);
+  const [debugSnapshot, setDebugSnapshot] = useState({
+    native: null,
+    worker: null,
+    audioPending: 0,
+    audioBufferedSeconds: 0,
+  });
+  const [logLevel, setLogLevel] = useState(24);
 
   const canvas2dRef = useRef(null);
   const canvasGlRef = useRef(null);
@@ -335,6 +352,12 @@ function App() {
     setHasOrderedChapters(false);
     setSelectedChapter("");
     setAttachments([]);
+    setDebugSnapshot({
+      native: null,
+      worker: null,
+      audioPending: 0,
+      audioBufferedSeconds: 0,
+    });
     updateStats();
   };
 
@@ -416,6 +439,12 @@ function App() {
     clearAudioQueue();
     resetUi();
     log("Stopped.");
+  };
+
+  const changeLogLevel = (level) => {
+    const nextLevel = Number(level);
+    setLogLevel(nextLevel);
+    workerRef.current?.postMessage({ type: "setLogLevel", level: nextLevel });
   };
 
   const performSeek = (seconds) => {
@@ -580,6 +609,36 @@ function App() {
         log(msg.message || "");
         return;
       }
+      if (msg.type === "ffmpegLog") {
+        const level = Number.isFinite(msg.level) ? `:${msg.level}` : "";
+        log(`[ffmpeg${level}] ${msg.message || ""}`);
+        return;
+      }
+      if (msg.type === "subtitleLog") {
+        const start = Number.isFinite(msg.startMs) ? `${msg.startMs}ms` : "?";
+        const end = Number.isFinite(msg.endMs) ? `${msg.endMs}ms` : "?";
+        log(`[subtitle] ${start}-${end} ${msg.text || ""}`);
+        return;
+      }
+      if (msg.type === "subtitleDebug") {
+        log(
+          `[subtitle-debug] ${msg.note || ""} events=${msg.nEvents ?? "-"} first=${msg.firstStartMs ?? "-"}-${msg.firstEndMs ?? "-"}`,
+        );
+        return;
+      }
+      if (msg.type === "debugSnapshot") {
+        setDebugSnapshot({
+          native: msg.native || null,
+          worker: msg.worker || null,
+          audioPending: audioRef.current.pending.length,
+          audioBufferedSeconds: audioRef.current.bufferedSeconds,
+        });
+        return;
+      }
+      if (msg.type === "error") {
+        log(`[worker-error] ${msg.message || "Unknown worker error"}`);
+        return;
+      }
       if (msg.type === "chapters") {
         const nextChapters = Array.isArray(msg.chapters)
           ? msg.chapters.map((chapter, index) => ({
@@ -687,6 +746,30 @@ function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const nativeDebug = debugSnapshot.native || {};
+  const workerDebug = debugSnapshot.worker || {};
+  const debugRows = [
+    ["IO mode", nativeDebug.ioMode === 1 ? "random access" : "append"],
+    ["Byte pos", formatDebugValue(nativeDebug.bytePos, 0)],
+    ["AVIO pos", formatDebugValue(nativeDebug.avioPos, 0)],
+    ["AVIO seekable", formatDebugValue(nativeDebug.avioSeekable, 0)],
+    ["Buffered", formatBytes(Number(nativeDebug.bufferedBytes) || 0)],
+    ["Video stream", formatDebugValue(nativeDebug.videoStream, 0)],
+    ["Audio stream", formatDebugValue(nativeDebug.audioStream, 0)],
+    ["Subtitle stream", formatDebugValue(nativeDebug.subtitleStream, 0)],
+    ["Packet stream", formatDebugValue(nativeDebug.lastPacketStream, 0)],
+    ["Packet PTS", formatDebugValue(nativeDebug.lastPacketPts)],
+    ["Video PTS", formatDebugValue(nativeDebug.videoPts)],
+    ["Audio PTS", formatDebugValue(nativeDebug.audioPts)],
+    ["Audio samples", formatDebugValue(nativeDebug.audioSamples, 0)],
+    ["Audio pending", formatDebugValue(debugSnapshot.audioPending, 0)],
+    ["Audio buffered", `${formatDebugValue(debugSnapshot.audioBufferedSeconds)}s`],
+    ["Subtitle events", formatDebugValue(nativeDebug.subtitleEvents, 0)],
+    ["Packets", formatDebugValue(nativeDebug.packetsRead, 0)],
+    ["Heap", formatBytes(Number(workerDebug.heapBytes) || 0)],
+    ["Last error", workerDebug.lastErrorText || formatDebugValue(workerDebug.lastError, 0)],
+  ];
 
   return (
     <main className="app">
@@ -919,6 +1002,44 @@ function App() {
             <span>{stats.audioClock}</span>
           </div>
         </div>
+        <section className="debug-panel" aria-label="Debug">
+          <div className="debug-header">
+            <h2>Debug</h2>
+            <label>
+              FFmpeg logs
+              <select
+                value={logLevel}
+                disabled={!ready}
+                onChange={(event) => changeLogLevel(event.target.value)}
+              >
+                <option value={16}>error</option>
+                <option value={24}>warning</option>
+                <option value={32}>info</option>
+                <option value={48}>debug</option>
+                <option value={56}>trace</option>
+              </select>
+            </label>
+          </div>
+          <div className="debug-grid">
+            {debugRows.map(([label, value]) => (
+              <div className="debug-item" key={label}>
+                <span className="label">{label}</span>
+                <span>{value}</span>
+              </div>
+            ))}
+          </div>
+          <div className="debug-seeks">
+            <span className="label">Recent seeks</span>
+            <span>
+              {Array.isArray(workerDebug.recentSeeks) && workerDebug.recentSeeks.length
+                ? workerDebug.recentSeeks
+                    .slice(-3)
+                    .map((item) => `${formatDebugValue(item.from)}s -> ${formatDebugValue(item.target)}s`)
+                    .join(", ")
+                : "-"}
+            </span>
+          </div>
+        </section>
         <pre aria-live="polite">{logText}</pre>
       </section>
     </main>

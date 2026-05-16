@@ -7,16 +7,41 @@ MKV seeking is *very* dependent on being able to do (1), because the demuxer oft
 
 ---
 
+## Current project policy
+
+In this repo, append mode is progressive-only. It is not marked seekable after open, and `ffmpeg_wasm_seek_seconds()` returns `ENOSYS` unless the context is using `FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL`.
+
+Use append mode for streaming playback where seeking is disabled. Use `read_at` mode for local files and any source that can honor arbitrary byte reads. The v3 worker now probes URL sources with `Range: bytes=0-0`; URLs that return `206 Partial Content` plus an exposed `Content-Range` size are opened through the same `read_at` path, backed by synchronous worker-side Range reads.
+
+The previous `ffmpeg_wasm_prepare_restream()` path is deprecated and returns `ENOSYS`. Re-streaming by changing AVIO internals was too fragile for MKV and made browser behavior hard to reason about.
+
+---
+
 ## The simplest answer
 
 ### If the file is local on disk
 
-Don’t implement chunked I/O at all. Let FFmpeg read the file directly and you get seeking “for free”:
+Don’t implement append-style chunked I/O. In this WASM project, expose `Module.ffmpegReadAt(offset, len, dstPtr)` and put the native context in random-access mode:
 
-* open: `avformat_open_input(&fmt, "test.mkv", NULL, NULL)`
-* seek: `avformat_seek_file()` or `av_seek_frame()`
+* set mode: `ffmpeg_wasm_set_io_mode(ctx, FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL)`
+* set size: `ffmpeg_wasm_set_file_size(ctx, file.size)`
+* read bytes: implement `Module.ffmpegReadAt(...)`
+* seek: `ffmpeg_wasm_seek_seconds()` uses `avformat_seek_file()`
 
-Chunked reading is mainly for **network/custom storage**, not local files.
+Append reading is mainly for **progressive network/custom storage**, not seekable local files.
+
+### If the URL supports HTTP Range
+
+The v3 worker can use random-access IO for direct URLs when the server supports CORS and byte ranges:
+
+* probe: `fetch(url, { headers: { Range: "bytes=0-0" } })`
+* require: `206 Partial Content`
+* require: exposed `Content-Range` with total size
+* set mode: `ffmpeg_wasm_set_io_mode(ctx, FFMPEG_WASM_IO_RANDOM_ACCESS_LOCAL)`
+* set size: `ffmpeg_wasm_set_file_size(ctx, totalSize)`
+* read bytes: `Module.ffmpegReadAt(...)` uses synchronous `XMLHttpRequest` Range reads inside the worker
+
+If the probe fails, v3 falls back to append streaming and keeps seeking disabled.
 
 ---
 
@@ -120,7 +145,7 @@ Then start reading packets/frames again.
 
 ## The big gotchas (these bite MKV hard)
 
-### 1) If your “stream” isn’t truly random-access, seeking will be limited
+### 1) If your “stream” isn’t truly random-access, seeking should be disabled
 
 If your source is HTTP or remote storage, implement **Range requests** so your seek callback can fetch bytes at `offset`.
 
@@ -146,7 +171,7 @@ Open demuxer once; seeking is repositioning the same logical stream, not reiniti
 ## Quick recommendation
 
 * **Local file**: stop chunking, open by filename, use `avformat_seek_file`.
-* **Remote file**: implement Range-backed seek callback + AVSEEK_SIZE.
+* **Remote file**: v3 already uses Range-backed `read_at` when the URL exposes `206 Partial Content` and `Content-Range`; otherwise keep seeking disabled.
 * **Growing file**: either disable seeking or change container.
 
-If you tell me what stack you’re using (FFmpeg AVIOContext? GStreamer? Android extractor? something else) and whether the file is **fully written** or **still being produced**, I can give a concrete “drop-in” implementation pattern for that stack.
+For other playback stacks, use the same rule: only advertise seeking when the source can satisfy arbitrary byte reads and report a stable size.

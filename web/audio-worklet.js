@@ -2,13 +2,17 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
   constructor() {
     super();
     this.channels = 2;
-    this.capacityFrames = Math.max(2048, Math.floor(sampleRate * 1.5));
+    this.capacityFrames = Math.max(4096, Math.floor(sampleRate * 3));
     this.capacity = this.capacityFrames * this.channels;
     this.buffer = new Float32Array(this.capacity);
     this.readIndex = 0;
     this.writeIndex = 0;
     this.available = 0;
     this.reportCounter = 0;
+    this.droppedSamples = 0;
+    this.trimmedSamples = 0;
+    this.underrunFrames = 0;
+    this.held = false;
 
     this.port.onmessage = (event) => {
       const data = event.data;
@@ -23,6 +27,10 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
         this.pushSamples(samples);
       } else if (data.type === "clear") {
         this.resetBuffer();
+      } else if (data.type === "hold") {
+        this.held = Boolean(data.enabled);
+      } else if (data.type === "trim") {
+        this.trimFrames(data.frames);
       }
     };
   }
@@ -38,12 +46,34 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
     this.readIndex = 0;
     this.writeIndex = 0;
     this.available = 0;
+    this.droppedSamples = 0;
+    this.trimmedSamples = 0;
+    this.underrunFrames = 0;
   }
 
   resetBuffer() {
     this.readIndex = 0;
     this.writeIndex = 0;
     this.available = 0;
+  }
+
+  trimFrames(frames) {
+    const requestedFrames = Math.max(0, Math.floor(Number(frames) || 0));
+    if (requestedFrames <= 0 || this.available <= 0) {
+      return 0;
+    }
+    const requestedSamples = requestedFrames * this.channels;
+    const drop = Math.min(
+      this.available,
+      Math.floor(requestedSamples / this.channels) * this.channels,
+    );
+    if (drop <= 0) {
+      return 0;
+    }
+    this.readIndex = (this.readIndex + drop) % this.capacity;
+    this.available -= drop;
+    this.trimmedSamples += drop;
+    return drop;
   }
 
   pushSamples(samples) {
@@ -53,15 +83,20 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
 
     let input = samples;
     if (input.length >= this.capacity) {
-      input = input.subarray(input.length - this.capacity);
+      const keep = this.capacity - (this.capacity % this.channels);
+      input = input.subarray(input.length - keep);
       this.resetBuffer();
     }
 
     const free = this.capacity - this.available;
     if (input.length > free) {
-      const drop = input.length - free;
+      const drop = Math.min(
+        this.available,
+        Math.ceil((input.length - free) / this.channels) * this.channels,
+      );
       this.readIndex = (this.readIndex + drop) % this.capacity;
       this.available -= drop;
+      this.droppedSamples += drop;
     }
 
     let offset = 0;
@@ -88,20 +123,29 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
       output[ch].fill(0);
     }
 
-    if (this.available > 0) {
+    let missingFrames = 0;
+    if (!this.held) {
       for (let i = 0; i < frames; i += 1) {
+        let frameHadData = true;
         for (let ch = 0; ch < this.channels; ch += 1) {
           let sample = 0;
           if (this.available > 0) {
             sample = this.buffer[this.readIndex];
             this.readIndex = (this.readIndex + 1) % this.capacity;
             this.available -= 1;
+          } else {
+            frameHadData = false;
           }
           if (ch < output.length) {
             output[ch][i] = sample;
           }
         }
+        if (!frameHadData) missingFrames += 1;
       }
+    }
+
+    if (missingFrames > 0) {
+      this.underrunFrames += missingFrames;
     }
 
     this.reportCounter += 1;
@@ -110,8 +154,15 @@ class FFmpegAudioWorklet extends AudioWorkletProcessor {
       this.port.postMessage({
         type: "status",
         available: this.available,
+        availableFrames: Math.floor(this.available / this.channels),
+        bufferedSeconds: this.available / this.channels / sampleRate,
+        droppedSamples: this.droppedSamples,
+        trimmedSamples: this.trimmedSamples,
+        underrunFrames: this.underrunFrames,
         channels: this.channels,
         sampleRate,
+        capacityFrames: this.capacityFrames,
+        held: this.held,
       });
     }
     return true;

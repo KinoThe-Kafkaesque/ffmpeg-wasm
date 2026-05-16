@@ -3,10 +3,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VARIANT="${FFMPEG_WASM_VARIANT:-}"
+BUILD_MODE="${FFMPEG_WASM_BUILD_MODE:-release}"
+WASM_THREADS="${FFMPEG_WASM_THREADS:-0}"
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/prepare-demo-assets.sh [--variant royaltyfree|royaltyfree-lgpl|full|gpl|gpl-royaltyfree|royaltyfree-gpl|lgpl|nonfree]
+Usage: ./scripts/prepare-demo-assets.sh [--debug] [--variant royaltyfree|royaltyfree-lgpl|full|gpl|gpl-royaltyfree|royaltyfree-gpl|lgpl|nonfree]
+
+Environment:
+  FFMPEG_WASM_THREADS  Match the build output suffix when copying pthread builds.
 EOF
 }
 
@@ -15,9 +20,31 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
-if [ "${1:-}" = "--variant" ]; then
-  VARIANT="${2:-}"
-  shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --variant)
+      VARIANT="${2:-}"
+      shift 2
+      ;;
+    --debug)
+      BUILD_MODE="debug"
+      shift
+      ;;
+    --release)
+      BUILD_MODE="release"
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if ! [[ "$WASM_THREADS" =~ ^[0-9]+$ ]]; then
+  echo "Invalid FFMPEG_WASM_THREADS value: $WASM_THREADS" >&2
+  exit 1
 fi
 
 case "${VARIANT:-full}" in
@@ -46,6 +73,23 @@ case "${VARIANT:-full}" in
     ;;
 esac
 
+if [ "$WASM_THREADS" -gt 1 ]; then
+  SRC_DIR="${SRC_DIR}-pthreads${WASM_THREADS}"
+fi
+
+case "$BUILD_MODE" in
+  release)
+    ;;
+  debug)
+    SRC_DIR="${SRC_DIR}-debug"
+    ;;
+  *)
+    echo "Unknown build mode: $BUILD_MODE" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
+
 if [ ! -f "$SRC_DIR/ffmpeg_wasm.js" ] || [ ! -f "$SRC_DIR/ffmpeg_wasm.wasm" ]; then
   echo "Build artifacts not found in $SRC_DIR" >&2
   echo "Run ./scripts/build-ffmpeg.sh first." >&2
@@ -57,9 +101,32 @@ copy_to() {
   mkdir -p "$target_dir"
   cp "$SRC_DIR/ffmpeg_wasm.js" "$target_dir/"
   cp "$SRC_DIR/ffmpeg_wasm.wasm" "$target_dir/"
+  if [ -f "$SRC_DIR/ffmpeg_wasm.worker.js" ]; then
+    cp "$SRC_DIR/ffmpeg_wasm.worker.js" "$target_dir/"
+  else
+    rm -f "$target_dir/ffmpeg_wasm.worker.js"
+  fi
+  if [ -f "$SRC_DIR/ffmpeg_wasm.wasm.map" ]; then
+    cp "$SRC_DIR/ffmpeg_wasm.wasm.map" "$target_dir/"
+  else
+    rm -f "$target_dir/ffmpeg_wasm.wasm.map"
+  fi
+  if [ -f "$SRC_DIR/ffmpeg_wasm.capabilities.json" ]; then
+    cp "$SRC_DIR/ffmpeg_wasm.capabilities.json" "$target_dir/"
+  else
+    rm -f "$target_dir/ffmpeg_wasm.capabilities.json"
+  fi
+  if [ -f "$SRC_DIR/ffmpeg-components.json" ]; then
+    cp "$SRC_DIR/ffmpeg-components.json" "$target_dir/"
+  else
+    rm -f "$target_dir/ffmpeg-components.json"
+  fi
+  if [ "$target_dir" != "$ROOT_DIR/web" ]; then
+    cp "$ROOT_DIR/web/ffmpeg-wasm-api.js" "$target_dir/"
+  fi
 }
 
 copy_to "$ROOT_DIR/web"
 copy_to "$ROOT_DIR/web-react/public"
 
-echo "Copied ffmpeg_wasm.js/.wasm into web/ and web-react/public/"
+echo "Copied $BUILD_MODE ffmpeg_wasm assets, manifests, and ffmpeg-wasm-api.js into web/ and web-react/public/"
