@@ -176,6 +176,33 @@ const probeRangeSource = async (url) => {
   }
 };
 
+// Heap views cached on the Emscripten Module (HEAPU8/HEAPF32/...) go stale after a
+// WASM memory growth. With pthreads + ALLOW_MEMORY_GROWTH the growth can happen on
+// another thread at any time, leaving this worker's cached views pointing at the old,
+// smaller buffer. wasmMemory.buffer always reflects the current (grown) heap, so rebuild
+// the views from it whenever they no longer match. Mirrors Emscripten's own
+// GROWABLE_HEAP_* guard (if (wasmMemory.buffer != HEAP8.buffer) updateMemoryViews()).
+const refreshHeapViews = () => {
+  const mod = state.Module;
+  const mem = mod && mod.wasmMemory;
+  if (!mem || (mod.HEAPU8 && mod.HEAPU8.buffer === mem.buffer)) {
+    return mod;
+  }
+  const b = mem.buffer;
+  mod.HEAP8 = new Int8Array(b);
+  mod.HEAP16 = new Int16Array(b);
+  mod.HEAP32 = new Int32Array(b);
+  mod.HEAPU8 = new Uint8Array(b);
+  mod.HEAPU16 = new Uint16Array(b);
+  mod.HEAPU32 = new Uint32Array(b);
+  mod.HEAPF32 = new Float32Array(b);
+  mod.HEAPF64 = new Float64Array(b);
+  return mod;
+};
+
+const heapU8 = () => refreshHeapViews().HEAPU8;
+const heapF32 = () => refreshHeapViews().HEAPF32;
+
 const readRangeSync = (source, offset, len, dstPtr) => {
   const start = Math.max(0, Math.trunc(Number(offset) || 0));
   const want = Math.max(0, Math.trunc(Number(len) || 0));
@@ -198,7 +225,7 @@ const readRangeSync = (source, offset, len, dstPtr) => {
   }
   const data = xhr.response ? new Uint8Array(xhr.response) : null;
   if (!data || data.byteLength === 0) return 0;
-  state.Module.HEAPU8.set(data.subarray(0, want), dstPtr >>> 0);
+  heapU8().set(data.subarray(0, want), dstPtr >>> 0);
   return Math.min(data.byteLength, want);
 };
 
@@ -610,7 +637,7 @@ const allocateAndAppend = (chunk) => {
     postLog(`malloc failed for ${chunk.length} bytes`);
     return -12; // AVERROR(ENOMEM)
   }
-  Module.HEAPU8.set(chunk, ptr);
+  heapU8().set(chunk, ptr);
   const ret = state.api.append(state.ctx, ptr, chunk.length);
   Module._free(ptr);
   return ret;
@@ -945,7 +972,7 @@ const streamUrl = async (url) => {
 
 const copyRgba = (ptr, stride, width, height, target) => {
   const rowSize = width * 4;
-  const heap = state.Module.HEAPU8;
+  const heap = heapU8();
   for (let y = 0; y < height; y += 1) {
     const srcStart = ptr + y * stride;
     const srcEnd = srcStart + rowSize;
@@ -1178,7 +1205,16 @@ const handleAudioFrame = () => {
   }
 
   const totalSamples = nbSamples * channels;
-  const view = new Float32Array(state.Module.HEAPF32.buffer, ptr, totalSamples);
+  const heap = heapF32();
+  if (
+    (ptr >>> 0) + totalSamples * Float32Array.BYTES_PER_ELEMENT >
+    heap.buffer.byteLength
+  ) {
+    // Transient stale-heap read (a memory growth raced this decode). Skip this
+    // frame instead of throwing an uncaught RangeError that kills the worker.
+    return null;
+  }
+  const view = new Float32Array(heap.buffer, ptr, totalSamples);
   const copy = new Float32Array(totalSamples);
   copy.set(view);
   const pts = state.api.audioPts(state.ctx);
@@ -1580,7 +1616,7 @@ const injectFont = () => {
       postLog("Failed to allocate memory for font");
       return;
     }
-    state.Module.HEAPU8.set(state.fontData, ptr);
+    heapU8().set(state.fontData, ptr);
     state.api.addFont(state.ctx, SUBTITLE_FALLBACK_FONT_FILE, ptr, len);
     state.Module._free(ptr);
     postLog(`Injected default font (${SUBTITLE_FALLBACK_FONT_FAMILY}) into libass.`);
@@ -1829,7 +1865,7 @@ const initModule = async () => {
         const view = new Uint8Array(
           state.fileReaderSync.readAsArrayBuffer(file.slice(start, end)),
         );
-        state.Module.HEAPU8.set(view, dstPtr >>> 0);
+        heapU8().set(view, dstPtr >>> 0);
         return view.byteLength;
       } catch (err) {
         return -5; // EIO
