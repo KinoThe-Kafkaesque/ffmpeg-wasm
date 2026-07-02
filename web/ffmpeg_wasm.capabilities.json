@@ -3,7 +3,7 @@
   "packageName": "ffmpeg-wasm",
   "variant": "full",
   "buildMode": "release",
-  "generatedAt": "2026-05-13T20:20:22.926Z",
+  "generatedAt": "2026-07-02T20:55:30.389Z",
   "wasm": {
     "simd": true,
     "pthreads": true,
